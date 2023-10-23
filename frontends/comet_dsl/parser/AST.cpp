@@ -1,33 +1,34 @@
 //===- AST.cpp - Helper for printing out the COMET AST
 //
-// Copyright 2022 Battelle Memorial Institute
-//
-// Redistribution and use in source and binary forms, with or without modification,
-// are permitted provided that the following conditions are met:
-//
-// 1. Redistributions of source code must retain the above copyright notice, this list of conditions
-// and the following disclaimer.
-//
-// 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions
-// and the following disclaimer in the documentation and/or other materials provided with the distribution.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
-// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
-// =============================================================================
-//
-// This file implements the AST dump for COMET DSL.
-//
+/// Copyright 2022 Battelle Memorial Institute
+///
+/// Redistribution and use in source and binary forms, with or without modification,
+/// are permitted provided that the following conditions are met:
+///
+/// 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+/// and the following disclaimer.
+///
+/// 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions
+/// and the following disclaimer in the documentation and/or other materials provided with the distribution.
+///
+/// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+/// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+/// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+/// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+/// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+/// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+/// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+///
+/// =============================================================================
+///
+/// This file implements the AST dump for COMET DSL.
+///
 //===----------------------------------------------------------------------===//
 
 #include "AST.h"
 
 #include "llvm/ADT/Twine.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace tensorAlgebra;
@@ -35,8 +36,8 @@ using namespace tensorAlgebra;
 namespace
 {
 
-  // RAII helper to manage increasing/decreasing the indentation as we traverse
-  // the AST
+  /// RAII helper to manage increasing/decreasing the indentation as we traverse
+  /// the AST
   struct Indent
   {
     Indent(int &level) : level(level) { ++level; }
@@ -52,7 +53,7 @@ namespace
     void dump(ModuleAST *Node);
 
   private:
-    void dump(VarType &type);
+    void dump(const VarType &type);
     void dump(VarDeclExprAST *varDecl);
     void dump(ExprAST *expr);
     void dump(ExprASTList *exprList);
@@ -75,7 +76,7 @@ namespace
     void dump(PrintElapsedTimeExprAST *node);
     void dump(GetTimeExprAST *node);
 
-    // Actually print spaces matching the current indentation level
+    /// Actually print spaces matching the current indentation level
     void indent()
     {
       for (int i = 0; i < curIndent; i++)
@@ -84,7 +85,7 @@ namespace
     int curIndent = 0;
   };
 
-} // namespace
+} /// namespace
 
 /// Return a formatted string for the location of any node
 template <typename T>
@@ -96,8 +97,8 @@ static std::string loc(T *Node)
       .str();
 }
 
-// Helper Macro to bump the indentation level and print the leading spaces for
-// the current indentations
+/// Helper Macro to bump the indentation level and print the leading spaces for
+/// the current indentations
 #define INDENT()            \
   Indent level_(curIndent); \
   indent();
@@ -125,7 +126,7 @@ void ASTDumper::dump(ExprAST *expr)
   dispatch(TransposeExprAST);
   dispatch(PrintElapsedTimeExprAST);
   dispatch(GetTimeExprAST);
-  // No match, fallback to a generic message
+  /// No match, fallback to a generic message
   INDENT();
   llvm::errs() << "<unknown Expr, kind " << expr->getKind() << ">\n";
 }
@@ -138,7 +139,8 @@ void ASTDumper::dump(VarDeclExprAST *varDecl)
   llvm::errs() << "VarDecl " << varDecl->getName();
   dump(varDecl->getType());
   llvm::errs() << " " << loc(varDecl) << "\n";
-  dump(varDecl->getInitVal());
+  if (auto *initVal = varDecl->getInitVal())
+    dump(initVal);
 }
 
 /// A "block", or a list of expression
@@ -149,7 +151,7 @@ void ASTDumper::dump(ExprASTList *exprList)
   for (auto &expr : *exprList)
     dump(expr.get());
   indent();
-  llvm::errs() << "} // Block\n";
+  llvm::errs() << "} /// Block\n";
 }
 
 /// A literal number, just print the value.
@@ -165,7 +167,7 @@ void ASTDumper::dump(NumberExprAST *num)
 ///    <2,2>[<2>[ 1, 2 ], <2>[ 3, 4 ] ]
 void printLitHelper(ExprAST *lit_or_num)
 {
-  // Inside a literal expression we can have either a number or another literal
+  /// Inside a literal expression we can have either a number or another literal
   if (auto num = llvm::dyn_cast<NumberExprAST>(lit_or_num))
   {
     llvm::errs() << num->getValue();
@@ -173,7 +175,7 @@ void printLitHelper(ExprAST *lit_or_num)
   }
   auto *literal = llvm::cast<LiteralExprAST>(lit_or_num);
 
-  // Print the dimension for this literal first
+  /// Print the dimension for this literal first
   llvm::errs() << "<";
   {
     const char *sep = "";
@@ -185,7 +187,7 @@ void printLitHelper(ExprAST *lit_or_num)
   }
   llvm::errs() << ">";
 
-  // Now print the content, recursing on every element of the list
+  /// Now print the content, recursing on every element of the list
   llvm::errs() << "[ ";
   const char *sep = "";
   for (auto &elt : literal->getValues())
@@ -218,7 +220,7 @@ void ASTDumper::dump(ReturnExprAST *Node)
 {
   INDENT();
   llvm::errs() << "Return\n";
-  if (Node->getExpr().hasValue())
+  if (Node->getExpr().has_value())
     return dump(*Node->getExpr());
   {
     INDENT();
@@ -248,7 +250,7 @@ void ASTDumper::dump(CallExprAST *Node)
 {
   INDENT();
   llvm::errs() << "Call '" << Node->getCallee() << "' [ " << loc(Node) << "\n";
-  dump(Node->getArgs());
+  /// dump(Node->getArgs());
   indent();
   llvm::errs() << "]\n";
 }
@@ -264,7 +266,7 @@ void ASTDumper::dump(PrintExprAST *Node)
 }
 
 /// Print type: only the shape is printed in between '<' and '>'
-void ASTDumper::dump(VarType &type)
+void ASTDumper::dump(const VarType &type)
 {
   llvm::errs() << "<";
   if (type.elt_ty == VarType::TY_DOUBLE)
@@ -318,7 +320,6 @@ void ASTDumper::dump(ModuleAST *Node)
     dump(&F);
 }
 
-// PNNL
 void ASTDumper::dump(IndexLabelDeclExprAST *node)
 {
   INDENT();
@@ -357,7 +358,7 @@ void ASTDumper::dump(ForLoopExprAST *node)
   INDENT();
   llvm::errs() << "For Loop start with it-var: " << node->getName() << " (";
 
-  llvm::errs() << node->getBegin() << "," << node->getEnd() << "," << node->getIncrement() 
+  llvm::errs() << node->getBegin() << "," << node->getEnd() << "," << node->getIncrement()
                << ") " << loc(node) << "\n";
 }
 
@@ -380,7 +381,7 @@ void ASTDumper::dump(TransposeExprAST *node)
 {
   INDENT();
   llvm::errs() << "Transpose: " << node->getName() << " " << loc(node);
-               //<< "\n";
+  //<< "\n";
   llvm::errs() << "  Src Dims: [";
   for (auto elem : node->getSrcDims())
     llvm::errs() << elem << ", ";
@@ -389,7 +390,8 @@ void ASTDumper::dump(TransposeExprAST *node)
   llvm::errs() << "Dst Dims: [";
   for (auto elem : node->getDstDims())
     llvm::errs() << elem << ", ";
-  llvm::errs() << "]" << "\n";
+  llvm::errs() << "]"
+               << "\n";
 }
 
 void ASTDumper::dump(PrintElapsedTimeExprAST *node)
@@ -412,7 +414,7 @@ void ASTDumper::dump(GetTimeExprAST *node)
 namespace tensorAlgebra
 {
 
-  // Public API
+  /// Public API
   void dump(ModuleAST &module) { ASTDumper().dump(&module); }
 
-} // namespace tensorAlgebra
+} /// namespace tensorAlgebra

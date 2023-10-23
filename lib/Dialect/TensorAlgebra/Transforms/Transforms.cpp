@@ -28,24 +28,14 @@
 
 #include "comet/Dialect/TensorAlgebra/IR/TADialect.h"
 #include "comet/Dialect/TensorAlgebra/Passes.h"
-#include "comet/Dialect/IndexTree/IR/ITDialect.h"
+#include "comet/Dialect/IndexTree/IR/IndexTreeDialect.h"
 #include "comet/Dialect/Utils/Utils.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Linalg/EDSC/Intrinsics.h"
-#include "mlir/Dialect/Linalg/IR/LinalgOps.h"
-#include "mlir/Dialect/Linalg/IR/LinalgTypes.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
-
-#include "mlir/Dialect/StandardOps/EDSC/Intrinsics.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/DialectConversion.h"
-#include "mlir/IR/Matchers.h"
-#include "mlir/IR/PatternMatch.h"
-#include "llvm/ADT/Sequence.h"
-#include "mlir/EDSC/Builders.h"
-#include "mlir/Dialect/StandardOps/EDSC/Intrinsics.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 
 #include <limits>
 #include <map>
@@ -57,40 +47,24 @@
 #define DEBUG_TYPE "comet-transforms"
 
 using namespace mlir;
-using namespace mlir::edsc;
-using namespace mlir::edsc::intrinsics;
 using namespace mlir::linalg;
+using namespace mlir::bufferization;
 
 using namespace mlir::tensorAlgebra;
 using namespace mlir::indexTree;
 
 // *********** For debug purpose *********//
-// #ifndef DEBUG_MODE_TRANSFORMS
-// #define DEBUG_MODE_TRANSFORMS
-// #endif
-
-#ifdef DEBUG_MODE_TRANSFORMS
-#define comet_debug() llvm::errs() << __FILE__ << " " << __LINE__ << " "
-#define comet_pdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n->dump()
-#define comet_vdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n.dump()
-#else
-#define comet_debug() llvm::nulls()
-#define comet_pdump(n)
-#define comet_vdump(n)
-#endif
+//#define COMET_DEBUG_MODE
+#include "comet/Utils/debug.h"
+#undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
 
 std::vector<Value> dim_format;
 
-
 namespace
 {
-  // Chain of multiplication operations produces ChainSetOp 
-  // and it needs to be lowered
+  /// Chain of multiplication operations produces ChainSetOp
+  /// and it needs to be lowered
   struct ChainSetOpLowering : public ConversionPattern
   {
     ChainSetOpLowering(MLIRContext *ctx)
@@ -130,8 +104,8 @@ namespace
         comet_debug() << "\n";
         auto rhsLT = cast<tensorAlgebra::LabeledTensorOp>(rhs);
 
-        auto lhsLabels = lhsLT.labels();
-        auto rhsLabels = rhsLT.labels();
+        auto lhsLabels = lhsLT.getLabels();
+        auto rhsLabels = rhsLT.getLabels();
         std::vector<Operation *> lhsLabelOps, rhsLabelOps;
         for (const auto lbl : lhsLabels)
         {
@@ -147,7 +121,7 @@ namespace
         auto inPermAttr = AffineMapAttr::get(AffineMap::getPermutationMap(inPerm, ctx));
         auto outPermAttr = AffineMapAttr::get(AffineMap::getPermutationMap(outPerm, ctx));
 
-        auto new_op = rewriter.create<tensorAlgebra::TensorCopyOp>(loc, lhsLT.tensor(), rhsLT.tensor(), inPermAttr, outPermAttr);
+        auto new_op = rewriter.create<tensorAlgebra::TensorCopyOp>(loc, lhsLT.getTensor(), rhsLT.getTensor(), inPermAttr, outPermAttr);
         comet_debug() << "\n";
         comet_vdump(new_op);
 
@@ -165,15 +139,14 @@ namespace
       {
         comet_debug() << "Neither MulOp, AddOp, nor LabeledTensorOp, it is: ";
         comet_pdump(rhs);
-        // return failure();
         comet_debug() << "ChainSetOpLowering end\n";
         return success();
       }
 
       comet_debug() << "\n";
-      auto lhsTensor = lhsLT.tensor();
+      auto lhsTensor = lhsLT.getTensor();
       comet_debug() << "\n";
-      auto labels = lhsLT.labels();
+      auto labels = lhsLT.getLabels();
       comet_debug() << "\n";
       std::vector<Value> lhsLabels(labels.begin(), labels.end());
 
@@ -186,6 +159,7 @@ namespace
     }
   };
 
+  /// TODO(gkestor): test TensorCopyLowering
   struct TensorCopyLowering : public ConversionPattern
   {
     TensorCopyLowering(MLIRContext *ctx)
@@ -202,17 +176,18 @@ namespace
       auto tensorCopyOp = cast<tensorAlgebra::TensorCopyOp>(op);
 
       auto lhsTensorOperand = operands[0];
-      auto lhsTensorLoadOp = cast<memref::TensorLoadOp>(lhsTensorOperand.getDefiningOp());
-      auto lhsMemref = lhsTensorLoadOp.memref();
+      auto lhsTensorLoadOp = cast<ToTensorOp>(lhsTensorOperand.getDefiningOp());
+      auto lhsMemref = lhsTensorLoadOp.getMemref();
 
       auto rhsTensorOperand = operands[1];
-      auto rhsTensorLoadOp = cast<memref::TensorLoadOp>(rhsTensorOperand.getDefiningOp());
-      auto rhsMemref = rhsTensorLoadOp.memref();
+      auto rhsTensorLoadOp = cast<ToTensorOp>(rhsTensorOperand.getDefiningOp());
+      ;
+      auto rhsMemref = rhsTensorLoadOp.getMemref();
 
-      auto inPermMap = tensorCopyOp.inputPerm();
-      auto outPermMap = tensorCopyOp.outputPerm();
-
-      auto copyOp = rewriter.create<linalg::CopyOp>(loc, rhsMemref, lhsMemref, inPermMap, outPermMap);
+      /// TODO(gkestor): better way to cast AffineMap to ArrayRef<int64_t>
+      auto outPermMap = tensorCopyOp.getOutputPermAttr();
+      std::vector<std::vector<int64_t>> allPerms = getAllPerms(dyn_cast<ArrayAttr>(outPermMap));
+      auto copyOp = rewriter.create<linalg::TransposeOp>(loc, rhsMemref, lhsMemref, llvm::ArrayRef<int64_t>(allPerms[0]));
 
       auto alphaAttr = tensorCopyOp.getOperation()->getAttr("__alpha__");
       auto betaAttr = tensorCopyOp.getOperation()->getAttr("__beta__");
@@ -227,7 +202,7 @@ namespace
   };
 
   //===----------------------------------------------------------------------===//
-  // STCRemoveDeadOps RewritePatterns: SparseTensor Constant operations
+  /// STCRemoveDeadOps RewritePatterns: SparseTensor Constant operations
   //===----------------------------------------------------------------------===//
 
   struct RemoveDeadOpLowering : public OpRewritePattern<tensorAlgebra::TensorMultOp>
@@ -239,11 +214,11 @@ namespace
       assert(isa<tensorAlgebra::TensorMultOp>(op));
       comet_debug() << " erase TensorMultOp \n";
       comet_debug() << "--------------TensorContractionLowering in format\n";
-      // Here, should check the operands, at least one operand should be sparse;
-      // Otherwise, if all dense operands, just return.
+      /// Here, should check the operands, at least one operand should be sparse;
+      /// Otherwise, if all dense operands, just return.
       return success();
     }
-  }; // TensorContractionLowering
+  }; /// TensorContractionLowering
 
   template <typename TAOp>
   struct RemoveDeadTAOpLowering : public ConversionPattern
@@ -264,20 +239,21 @@ namespace
 
 }
 
-// =============================================================================
+/// =============================================================================
 //
-// These patterns lowers tensor multiplication chains into s series of ta.tc operations.
+/// These patterns lowers tensor multiplication chains into s series of ta.tc operations.
 //
 //===----------------------------------------------------------------------===//
 void mlir::tensorAlgebra::populateLowerTAMulChainPatterns(
-    OwningRewritePatternList &patterns, MLIRContext *context)
+    RewritePatternSet &patterns, MLIRContext *context)
 {
   patterns.insert<ChainSetOpLowering>(context);
 }
 
 void mlir::tensorAlgebra::populateSTCRemoveDeadOpsPatterns(
-    OwningRewritePatternList &patterns, MLIRContext *context)
+    RewritePatternSet &patterns, MLIRContext *context)
 {
   patterns.insert<RemoveDeadTAOpLowering<tensorAlgebra::ChainMulOp>>(context);
   patterns.insert<RemoveDeadTAOpLowering<tensorAlgebra::IndexLabelDynamicOp>>(context);
+  patterns.insert<RemoveDeadTAOpLowering<tensorAlgebra::IndexLabelStaticOp>>(context);
 }

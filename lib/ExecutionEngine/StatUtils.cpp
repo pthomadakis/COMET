@@ -31,11 +31,12 @@
 #include <cstdio>
 #include <limits>
 #include <iomanip>
+#include <stdio.h>
 
 #include <random>
 
 //===----------------------------------------------------------------------===//
-// Small runtime support library for print some statistics.
+/// Small runtime support library for print some statistics.
 //===----------------------------------------------------------------------===//
 /// Returns the number of seconds since Epoch 1970-01-01 00:00:00 +0000 (UTC).
 extern "C" double getTime()
@@ -83,7 +84,7 @@ extern "C" void print_space()
 }
 
 //===----------------------------------------------------------------------===//
-// Small runtime support library for printing output scalar and tensors
+/// Small runtime support library for printing output scalar and tensors
 //===----------------------------------------------------------------------===//
 extern "C" void _mlir_ciface_comet_print_memref_f64(UnrankedMemRefType<double> *M)
 {
@@ -105,4 +106,40 @@ extern "C" void comet_print_memref_i64(int64_t rank, void *ptr)
 {
   UnrankedMemRefType<int64_t> descriptor = {rank, ptr};
   _mlir_ciface_comet_print_memref_i64(&descriptor);
+}
+
+//===----------------------------------------------------------------------===//
+/// Small runtime support library for memset
+//===----------------------------------------------------------------------===//
+extern "C" void _mlir_ciface_comet_memset_f64(UnrankedMemRefType<double> *M)
+{
+  cometMemset(*M);
+}
+
+extern "C" void _mlir_ciface_comet_memset_i64(UnrankedMemRefType<int64_t> *M)
+{
+  cometMemset(*M);
+}
+
+extern "C" void _mlir_ciface_comet_memset_i1(UnrankedMemRefType<bool> *M)
+{
+  cometMemset(*M);
+}
+
+extern "C" void comet_memset_f64(int64_t rank, void *ptr)
+{
+  UnrankedMemRefType<double> descriptor = {rank, ptr};
+  _mlir_ciface_comet_memset_f64(&descriptor);
+}
+
+extern "C" void comet_memset_i64(int64_t rank, void *ptr)
+{
+  UnrankedMemRefType<int64_t> descriptor = {rank, ptr};
+  _mlir_ciface_comet_memset_i64(&descriptor);
+}
+
+extern "C" void comet_memset_i1(int64_t rank, void *ptr)
+{
+  UnrankedMemRefType<bool> descriptor = {rank, ptr};
+  _mlir_ciface_comet_memset_i1(&descriptor);
 }

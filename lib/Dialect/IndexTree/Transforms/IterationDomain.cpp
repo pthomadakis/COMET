@@ -23,14 +23,15 @@
 #include "comet/Dialect/IndexTree/Transforms/Tensor.h"
 
 using namespace std;
-
-std::vector<unique_ptr<IterDomain>> IterDomain::domains;
+// Since multiple threads can lower different functions,
+// we need one for each thread lowering.
+thread_local std::vector<unique_ptr<IterDomain>> domains;
 
 IterDomain *IterDomain::makeDomain(Tensor *tensor, int dim)
 {
   auto d = make_unique<IterDomain>(tensor, dim);
   auto p = d.get();
-  domains.push_back(move(d));
+  domains.push_back(std::move(d));
   return p;
 }
 
@@ -38,7 +39,7 @@ IterDomain *IterDomain::conjunct(IterDomain *a, IterDomain *b)
 {
   auto d = make_unique<IterDomain>('*', a, b);
   auto p = d.get();
-  domains.push_back(move(d));
+  domains.push_back(std::move(d));
   return p;
 }
 

@@ -1,29 +1,23 @@
-add_llvm_library(COMETTensorAlgebra
+add_llvm_library(COMETTensorAlgebraDialect
   IR/TADialect.cpp
-
-  Conversion/EarlyLowering.cpp
-  Conversion/PreLowering.cpp
-  Conversion/LowerPCToLoops.cpp
-  #Conversion/ReduceLowerToSCF.cpp
-  #Conversion/TransposeLowering.cpp
-  Conversion/TensorOpsLowering.cpp
-  Conversion/LateLowering.cpp 
-
 
   Transforms/Transforms.cpp
   Transforms/LinalgTransforms.cpp
   Transforms/TCtoTTGT.cpp
   Transforms/Passes.cpp
 
+  Transforms/CheckImplicitTensorDecls.cpp
+  Transforms/TensorDeclLowering.cpp
+
   ADDITIONAL_HEADER_DIRS
   ${COMET_MAIN_INCLUDE_DIR}/comet/Dialect/TensorAlgebra
   )
 
-
 add_dependencies(
-  COMETTensorAlgebra
-  COMETTAOpsIncGen
+  COMETTensorAlgebraDialect
+  COMETTensorAlgebraOpsIncGen
+  COMETTensorAlgebraPassIncGen
   )
 
-target_link_libraries(COMETTensorAlgebra MLIRIR)
+target_link_libraries(COMETTensorAlgebraDialect MLIRIR ${BLAS_LIBRARIES})
 

@@ -22,6 +22,7 @@
 #ifndef ITERATIONDOMAIN_H
 #define ITERATIONDOMAIN_H
 
+#include "llvm/Support/raw_ostream.h"
 #include <memory>
 #include <string>
 #include <iostream>
@@ -65,7 +66,6 @@ class IterDomain
   IterDomain *right = nullptr;
 
 public:
-  static std::vector<unique_ptr<IterDomain>> domains;
   static IterDomain *makeDomain(Tensor *tensor, int dim);
 
   IterDomain(Tensor *tensor, int dim) : tensor(tensor), dim(dim){};
@@ -164,7 +164,7 @@ public:
 
   bool equals(BoolExpr *that)
   {
-    assert(false && "Unsupported boolean operation\n");
+    llvm::errs() << "ERROR: Unsupported boolean operation\n";
     return false;
   }
 

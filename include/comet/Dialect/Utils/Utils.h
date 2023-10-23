@@ -25,14 +25,10 @@
 #define TENSORALGEBRA_UTILS_H_
 
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/Linalg/EDSC/Builders.h"
-
-#include "mlir/Dialect/MemRef/EDSC/Intrinsics.h"
-#include "mlir/Dialect/StandardOps/EDSC/Intrinsics.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-
-#include "mlir/Transforms/LoopUtils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
 
@@ -42,9 +38,8 @@
 #include <unordered_map>
 #include <typeinfo>
 
+/// TODO(gkestor): supports only f64 -  need generalization
 extern std::string VALUETYPE;
-extern unsigned int TENSOR_NUMS;
-extern unsigned int INPUT_TENSOR_NUMS;
 
 using namespace mlir::linalg;
 
@@ -59,22 +54,62 @@ namespace mlir
     MemRefType convertTensorToMemRef(TensorType type);
     Value insertAllocAndDealloc(MemRefType memtype, Location loc, PatternRewriter &rewriter);
     Value insertAllocAndInitialize(Location loc, MemRefType memtype, ValueRange allocValueRange, PatternRewriter &rewriter);
-    void insertInitialize(Location loc, Value cst_init, Value alloc_op, PatternRewriter &rewriter);
+    void insertInitialize(Location loc,
+                          Value cst_init,
+                          Value alloc_op,
+                          Value accessIdx,
+                          OpBuilder &builder,
+                          bool use_dynamic_init,
+                          Value dynamic_init);
     bool hasFuncDeclaration(ModuleOp &module, std::string funcName);
-    bool isFuncInMod(std::string funcname, ModuleOp module);
+
+    /*
+     * We should put template function definition in the header rather than in the cpp file.
+     * Reference:
+     * 1. Why can’t I separate the definition of my templates class from its declaration and put it inside a .cpp file?
+     *    https://isocpp.org/wiki/faq/templates#templates-defn-vs-decl
+     * 2. How can I avoid linker errors with my template functions?
+     *    https://isocpp.org/wiki/faq/templates#separate-template-fn-defn-from-decl
+     */
     template <class T>
-    unsigned int findIndexInVector(std::vector<T> const &vec, T e);
+    unsigned int findIndexInVector(std::vector<T> const &vec, T e)
+    {
+      // Check if element e exists in vector
+      auto it = std::find(vec.begin(), vec.end(), e);
+
+      // It accepts a range and an element to search in the given range. If element is found then
+      // it returns an iterator to the first element in the given range that’s equal to given element,
+      // else it returns an end of the list.
+      unsigned int ret = 0;
+      if (it != vec.end())
+      {
+        ret = std::distance(vec.begin(), it);
+      }
+      else
+      {
+        ret = vec.size();
+      }
+      return ret;
+    }
+
     template <typename T>
-    void print_vector(std::vector<T> vec);
-    template <>
-    void print_vector<bool>(std::vector<bool> vec);
+    void print_vector(std::vector<T> vec)
+    {
+      for ([[maybe_unused]] auto n : vec)
+      {
+        // comet_debug() << n << " ";
+      }
+      // comet_debug() << "\n";
+    }
+
     void print_vector_value(std::vector<Value> vec);
 
     std::string dump2str(Value t);
     std::vector<std::string> stringSplit(std::string s, std::string delimiter);
+    std::vector<unsigned> getReverseIdentityPermutation(size_t size);
     std::vector<unsigned> getIdentityPermutation(size_t size);
 
-    std::vector<std::vector<unsigned>> getAllPerms(ArrayAttr indexMaps);
+    std::vector<std::vector<int64_t>> getAllPerms(ArrayAttr indexMaps);
     std::vector<std::vector<int64_t>> getAllPermsWorkspace(ArrayAttr indexMaps);
 
     // Tensor algebra dialect
@@ -86,7 +121,7 @@ namespace mlir
     std::vector<unsigned> getFreeIndices(std::vector<unsigned> rhs_perm, std::vector<unsigned> lhs_perm);
     std::vector<unsigned> getSumIndices(std::vector<unsigned> rhs_perm, std::vector<unsigned> rhs_perm_free);
     std::vector<unsigned> getIndexIterateOrder(std::vector<unsigned> rhs1_perm, std::vector<unsigned> rhs2_perm);
-    std::vector<std::vector<std::string>> getAllFormats(ArrayAttr opFormatsArrayAttr, std::vector<std::vector<unsigned>> allPerms);
+    std::vector<std::vector<std::string>> getAllFormats(ArrayAttr opFormatsArrayAttr, std::vector<std::vector<int64_t>> allPerms);
     bool checkIsElementwise(std::vector<std::vector<int>> allPerms);
     bool checkIsMixedMode(std::vector<std::vector<std::string>> formats);
     bool checkIsDense(std::vector<std::string> format);
@@ -150,13 +185,13 @@ namespace mlir
     /// dfs traverse the tcRootOp,
     /// parent node can get from getUser() function, only one user since tree structure
     void dfsRootOpTree(Value tcRootOp, std::vector<Value> &ret);
-    void getAncestorsWp(Value op, std::vector<Value> &ret, std::vector<Value> dfsOps);
+    void getAncestorsWp(Value op, std::vector<Value> &ret /* output ancestors*/, std::vector<Value> &dfsOps);
 
     /// Method 0:
     /// Search for the tensor which contains index i from workspace tree ops: ta.tc_root
     /// Return the tensor name and the index in the tensor
     /// step: find the ancestor of each leaf, check the workspaceOp is in whose ancestorWP
-    void findLeafs(Value tcRootOp, std::vector<int> indices, std::vector<Value> dfsOps, std::vector<Value> &ret);
+    void findLeafs(Value tcRootOp, std::vector<int> &indices, std::vector<Value> &dfsOps, std::vector<Value> &ret /* output leaves */);
     bool isRealRoot(Operation *op);
     std::vector<std::vector<int>> convertArrayAttrIntTo2DVector(ArrayAttr perms);
     ArrayAttr convert2DVectorToArrayAttrInt(std::vector<std::vector<int>> t1_perms_int, OpBuilder &builder);
@@ -182,8 +217,8 @@ namespace mlir
                                     std::vector<std::vector<bool>> &inputOutputMapping);
 
     void getFormatsInfo(Value cur_op,
-                        std::vector<int> indices,
-                        std::vector<Value> leafs,
+                        std::vector<int> &indices,
+                        std::vector<Value> &leafs,
                         std::vector<Value> &tensors,
                         std::vector<unsigned int> &ids,
                         std::vector<std::string> &formats);
@@ -203,11 +238,11 @@ namespace mlir
                 ? true
                 : false;
 
-        // get M-N-K indices for gemm
+        /// get M-N-K indices for gemm
         std::tie(m_indices_, n_indices_, k_indices_) =
             getIndices(a_perm_, b_perm_, c_perm_);
 
-        // compute size map for each index
+        /// compute size map for each index
         for (size_t i = 0; i < a_perm_.size(); i++)
         {
           size_map_.insert({a_perm_[i], a_shape[i]});
@@ -221,7 +256,7 @@ namespace mlir
           size_map_.insert({c_perm_[i], c_shape[i]});
         }
 
-        // compute sizes for M-N-K sizes
+        /// compute sizes for M-N-K sizes
         m_size_ = 1;
         for (const auto &idx : m_indices_)
         {
@@ -357,7 +392,7 @@ namespace mlir
         }
         else
         {
-          // chose the permutation identified with which permutation_ order
+          /// chose the permutation identified with which permutation_ order
           std::tie(a_perm, b_perm, c_perm) = findPermutationsAtN(whichpermutation);
         }
         return std::make_tuple(a_perm, b_perm, c_perm);
@@ -381,7 +416,6 @@ namespace mlir
             {
               do
               {
-
                 if (curper == whichperm)
                 {
                   IndexVector a_idx, b_idx, c_idx;
@@ -446,7 +480,6 @@ namespace mlir
             {
               for (size_t i = 0; i < 2; i++)
               {
-
                 IndexVector a_idx, b_idx, c_idx;
                 uint64_t a_size, b_size, c_size;
                 double transposeTime = 0.0;
@@ -483,7 +516,7 @@ namespace mlir
                 if (b_perm_ != b_idx)
                 {
                   transposeTime +=
-                      // b_size is the memory size of B, the current heuristics is only based on memsize
+                      /// b_size is the memory size of B, the current heuristics is only based on memsize
                       getTransposeTime(b_size, getPermutation(b_perm_, b_idx));
                 }
 
@@ -537,9 +570,9 @@ namespace mlir
       bool inA_;
 
       std::string bestPermStr_;
-    }; // struct ContractionPlan
+    }; /// struct ContractionPlan
 
-  } // namespace tensorAlgebra
-} // namespace mlir
+  } /// namespace tensorAlgebra
+} /// namespace mlir
 
-#endif // TENSORALGEBRA_UTILS_H_
+#endif /// TENSORALGEBRA_UTILS_H_

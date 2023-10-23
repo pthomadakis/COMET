@@ -29,99 +29,292 @@
 #include "comet/Dialect/TensorAlgebra/Passes.h"
 #include "comet/Dialect/Utils/Utils.h"
 
-#include "mlir/Dialect/Linalg/IR/LinalgOps.h"
-#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
-#include "mlir/Conversion/LinalgToStandard/LinalgToStandard.h"
-#include "mlir/Dialect/Linalg/Analysis/DependenceAnalysis.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
-#include "mlir/Transforms/LoopUtils.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Linalg/TransformOps/LinalgTransformOps.h"
+#include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+// suppress all warnings coming from inclusion of blis.h in source tree
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wcast-qual"
+#include "blis.h"
+#endif
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wtype-limits"
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#include "blis.h"
+#endif
+
 using namespace mlir;
-using namespace mlir::edsc;
-using namespace mlir::edsc::intrinsics;
 using namespace mlir::linalg;
+using namespace mlir::arith;
 using namespace mlir::tensorAlgebra;
 
 // *********** For debug purpose *********//
-// #ifndef DEBUG_MODE_LINALGTRANSFORMS
-// #define DEBUG_MODE_LINALGTRANSFORMS
-// #endif
-
-#ifdef DEBUG_MODE_LINALGTRANSFORMS
-#define comet_debug() llvm::errs() << __FILE__ << " " << __LINE__ << " "
-#define comet_pdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n->dump()
-#define comet_vdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n.dump()
-#else
-#define comet_debug() llvm::nulls()
-#define comet_pdump(n)
-#define comet_vdump(n)
-#endif
+//#define COMET_DEBUG_MODE
+#include "comet/Utils/debug.h"
+#undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
 
+//===----------------------------------------------------------------------===//
+// LinAlg Matmul Tiling
+//===----------------------------------------------------------------------===//
 namespace
 {
-  class LinAlgMatmulTilingPass : public PassWrapper<LinAlgMatmulTilingPass, FunctionPass>
+  // Marker used as attribute name in generated Linalg rewriting transformations.
+  const StringLiteral kLinalgTransformMarker = "__with_tiling__";
+  std::string linalgMatmulUkrFname = "linalg_matmul_viewsxs_viewsxs_viewsxs";
+
+  /// Helper class to control application of linalg transformation patterns.
+  /// Control comes in 2 forms:
+  ///   1. attribute matching and setting behavior using the attribute named
+  ///      `kLinalgTransformMarker`. This can be used to build a state machine
+  ///      using attributes and incrementally applying patterns to advance states.
+  ///   2. filter function, which is a simple lambda on the Operation* that
+  ///      returns a LogicalResult.
+  struct LinalgTransformationFilter
+  {
+    using FilterFunction = std::function<LogicalResult(Operation *)>;
+
+    explicit LinalgTransformationFilter(
+        ArrayRef<StringAttr> matchDisjunction = {},
+        std::optional<StringAttr> replacement = std::nullopt);
+
+    explicit LinalgTransformationFilter(
+        const FilterFunction &f, ArrayRef<StringAttr> matchDisjunction = {},
+        std::optional<StringAttr> replacement = std::nullopt);
+
+    LinalgTransformationFilter(LinalgTransformationFilter &&) = default;
+    LinalgTransformationFilter(const LinalgTransformationFilter &) = default;
+    LogicalResult checkAndNotify(PatternRewriter &rewriter, Operation *op) const;
+    void replaceLinalgTransformationFilter(PatternRewriter &rewriter,
+                                           Operation *op) const;
+
+    LinalgTransformationFilter &addFilter(const FilterFunction &f)
+    {
+      if (f)
+        filters.push_back(f);
+      return *this;
+    }
+
+    template <typename... OpTypes>
+    LinalgTransformationFilter &addOpFilter()
+    {
+      return addFilter(
+          [](Operation *op)
+          { return success(isa<OpTypes...>(op)); });
+    }
+
+    LinalgTransformationFilter &addOpNameFilter(StringRef opName)
+    {
+      return addFilter([opName](Operation *op)
+                       { return success(op->getName().getStringRef() == opName); });
+    }
+
+    LinalgTransformationFilter &setMatchByDefault()
+    {
+      matchByDefault = true;
+      return *this;
+    }
+
+  private:
+    SmallVector<FilterFunction> filters;
+    SmallVector<StringAttr> matchDisjunction;
+    std::optional<StringAttr> replacement;
+    /// When set to true, if the attribute is not set, it will be treated as
+    /// a match. Default is false.
+    bool matchByDefault;
+  };
+
+  LinalgTransformationFilter::LinalgTransformationFilter(
+      ArrayRef<StringAttr> matchDisjunction,
+      std::optional<StringAttr> replacement)
+      : matchDisjunction(matchDisjunction.begin(), matchDisjunction.end()),
+        replacement(replacement), matchByDefault(false) {}
+
+  LogicalResult
+  LinalgTransformationFilter::checkAndNotify(PatternRewriter &rewriter,
+                                             Operation *op) const
+  {
+    if (llvm::any_of(filters,
+                     [&](const FilterFunction &f)
+                     { return failed(f(op)); }))
+      return failure();
+
+    auto attr = op->template getAttrOfType<StringAttr>(kLinalgTransformMarker);
+
+    if (!attr)
+    {
+      /// 1. Has no filter case and matchDisjunction is empty.
+      if (matchDisjunction.empty() || matchByDefault)
+        return success();
+
+      /// 2. Has no filter but was expecting a filter.
+      return rewriter.notifyMatchFailure(op, [&](Diagnostic &diag)
+                                         {
+      diag << " does not have any filter from list: ";
+      interleaveComma(matchDisjunction, diag); });
+    }
+
+    /// 4. Match explicit filter.
+    for (auto filter : matchDisjunction)
+      if (attr.getValue() == filter)
+        return success();
+
+    /// 5. Fail to match.
+    return rewriter.notifyMatchFailure(op, [&](Diagnostic &diag)
+                                       {
+    diag << " does not have any filter from list: ";
+    interleaveComma(matchDisjunction, diag); });
+  }
+
+  void LinalgTransformationFilter::replaceLinalgTransformationFilter(
+      PatternRewriter &rewriter, Operation *op) const
+  {
+    if (replacement.has_value())
+      op->setAttr(kLinalgTransformMarker, *replacement);
+    else
+      op->removeAttr(rewriter.getStringAttr(kLinalgTransformMarker));
+  }
+
+  /// Pattern that tiles linalg operations using the `TilingInterface`
+  /// with `scf.for` ops for iterating over the tiles) while
+  /// using a `filter` to avoid recursive application.
+  struct LinalgTilingLoops
+      : public OpInterfaceRewritePattern<TilingInterface>
+  {
+    LinalgTilingLoops(
+        MLIRContext *context, scf::SCFTilingOptions options,
+        LinalgTransformationFilter filter = LinalgTransformationFilter(),
+        PatternBenefit benefit = 1)
+        : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
+          options(std::move(options)), filter(std::move(filter)) {}
+
+    /// Construct a generic pattern applied to `opName`.
+    LinalgTilingLoops(
+        StringRef opName, MLIRContext *context, scf::SCFTilingOptions options,
+        LinalgTransformationFilter filter = LinalgTransformationFilter(),
+        PatternBenefit benefit = 1)
+        : OpInterfaceRewritePattern<TilingInterface>(context, benefit),
+          options(std::move(options)), filter(std::move(filter)) {}
+
+    LogicalResult matchAndRewrite(TilingInterface op,
+                                  PatternRewriter &rewriter) const override
+    {
+      if (failed(filter.checkAndNotify(rewriter, op)))
+        return failure();
+
+      FailureOr<scf::SCFTilingResult> tilingResult =
+          scf::tileUsingSCFForOp(rewriter, op, options);
+      if (failed(tilingResult))
+        return rewriter.notifyMatchFailure(op, "failed to tile operation");
+
+      if (op->getNumResults())
+      {
+        rewriter.replaceOp(op, tilingResult->replacements);
+      }
+      else
+      {
+        rewriter.eraseOp(op);
+      }
+
+      for (auto *tiledOp : tilingResult->tiledOps)
+        filter.replaceLinalgTransformationFilter(rewriter, tiledOp);
+      return success();
+    }
+
+  private:
+    scf::SCFTilingOptions options;
+    LinalgTransformationFilter filter;
+  };
+
+} /// namespace
+
+void get_level3_blocksizes(int *mc, int *kc, int *nc, int *mr, int *nr, int size_dt)
+{
+  /// Query a native context.
+  const cntx_t *cntx = bli_gks_query_nat_cntx();
+
+  *mc = (int)bli_cntx_get_blksz_def_dt(BLIS_DOUBLE, BLIS_MC, cntx);
+  *kc = (int)bli_cntx_get_blksz_def_dt(BLIS_DOUBLE, BLIS_KC, cntx);
+  *nc = (int)bli_cntx_get_blksz_def_dt(BLIS_DOUBLE, BLIS_NC, cntx);
+  *mr = (int)bli_cntx_get_blksz_def_dt(BLIS_DOUBLE, BLIS_MR, cntx);
+  *nr = (int)bli_cntx_get_blksz_def_dt(BLIS_DOUBLE, BLIS_NR, cntx);
+
+  /// printf("mc= %d, kc= %d, nc=%d, mr=%d, nr=%d\n", *mc, *kc, *nc, *mr, *nr);
+  return;
+}
+
+static void addPatternForTiling(MLIRContext *context,
+                                RewritePatternSet &patterns,
+                                StringRef filterName,
+                                StringRef updatedFilterName,
+                                ArrayRef<int64_t> tileSizes,
+                                ArrayRef<int64_t> interchange = {})
+{
+  scf::SCFTilingOptions tilingOptions;
+  tilingOptions.setTileSizes(tileSizes).setInterchange(interchange);
+  LinalgTransformationFilter filter(StringAttr::get(context, filterName),
+                                    StringAttr::get(context, updatedFilterName));
+  patterns.add<LinalgTilingLoops>(context, tilingOptions, filter);
+}
+
+namespace
+{
+  class LinAlgMatmulTilingPass : public PassWrapper<LinAlgMatmulTilingPass, OperationPass<func::FuncOp>>
   {
   public:
-    void runOnFunction() override
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinAlgMatmulTilingPass)
+    void runOnOperation() override
     {
-      // OwningRewritePatternList patterns;
+      func::FuncOp func = getOperation();
+      MLIRContext *ctx = func.getContext();
+      RewritePatternSet tilingPatterns(ctx);
 
-      auto funcOp = getFunction();
-      MLIRContext *ctx = funcOp.getContext();
+      int mc, kc, nc, mr, nr = 0;
+      get_level3_blocksizes(&mc, &kc, &nc, &mr, &nr, sizeof(double));
 
-      OwningRewritePatternList patterns(&getContext());
+      addPatternForTiling(ctx, tilingPatterns, "__with_tiling__", "__L2__with_tiling__", {mc, nc, kc}, {1, 2, 0});
+      addPatternForTiling(ctx, tilingPatterns, "__L2__with_tiling__", "__micro_kernel__", {nr, mr, kc}, {1, 0, 2});
 
-      // Add the matmul tiling patterns to the list.
-      //===----------------------------------------------------------------------===//
-      // BLIS HASWELL
-      //===----------------------------------------------------------------------===//
-      //#define BLIS_DGEMM_UKERNEL         bli_dgemm_asm_8x6
-      //#define BLIS_DEFAULT_MC_D          72
-      //#define BLIS_DEFAULT_KC_D          256
-      //#define BLIS_DEFAULT_NC_D          4080
-      //#define BLIS_DEFAULT_MR_D          8
-      //#define BLIS_DEFAULT_NR_D          6
-
-      patterns.insert<LinalgTilingPattern<MatmulOp>>(
-          ctx,
-          LinalgTilingOptions()
-              .setTileSizes({72, 4080, 256})
-              .setInterchange({1, 2, 0})
-              .setLoopType(LinalgTilingLoopType::Loops),
-          LinalgTransformationFilter(Identifier::get("__with_tiling__", ctx),
-                                     Identifier::get("L2__with_tiling__", ctx)));
-
-      patterns.insert<LinalgTilingPattern<MatmulOp>>(
-          ctx,
-          LinalgTilingOptions()
-              .setTileSizes({6, 8, 256})
-              .setInterchange({1, 0, 2})
-              .setLoopType(LinalgTilingLoopType::Loops),
-          LinalgTransformationFilter(Identifier::get("L2__with_tiling__", ctx),
-                                     Identifier::get("__micro_kernel__", ctx)));
-
-      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+      if (failed(applyPatternsAndFoldGreedily(getOperation(),
+                                              std::move(tilingPatterns))))
+        return signalPassFailure();
     }
   };
-} // end anonymous namespace
+} /// end anonymous namespace
 
+/////////////////////////////////////////////
+//////////LinAlg Matmul microkernel//////////
+/////////////////////////////////////////////
 namespace
 {
-  class LinalgMatMulOpToLibraryCallRewrite : public OpRewritePattern<MatmulOp>
+  class LinalgMatMulOpToLibraryCallPattern : public OpRewritePattern<MatmulOp>
   {
   public:
     using OpRewritePattern<MatmulOp>::OpRewritePattern;
     LogicalResult matchAndRewrite(MatmulOp op,
                                   PatternRewriter &rewriter) const override;
   };
+}
+
+static MemRefType makeStridedLayoutDynamic(MemRefType type)
+{
+  return MemRefType::Builder(type).setLayout(StridedLayoutAttr::get(
+      type.getContext(), ShapedType::kDynamic,
+      SmallVector<int64_t>(type.getRank(), ShapedType::kDynamic)));
 }
 
 /// Helper function to extract the operand types that are passed to the
@@ -132,23 +325,17 @@ static SmallVector<Type, 4> extractOperandTypes(Operation *op)
 {
   SmallVector<Type, 4> result;
   result.reserve(op->getNumOperands());
-  if (auto indexedGenericOp = dyn_cast<IndexedGenericOp>(op))
-  {
-    auto *ctx = op->getContext();
-    auto numLoops = indexedGenericOp.getNumLoops();
-    result.reserve(op->getNumOperands() + numLoops);
-    result.assign(numLoops, IndexType::get(ctx));
-  }
   for (auto type : op->getOperandTypes())
   {
-    // The underlying descriptor type (e.g. LLVM) does not have layout
-    // information. Canonicalizing the type at the level of std when going into
-    // a library call avoids needing to introduce DialectCastOp.
+    /// The underlying descriptor type (e.g. LLVM) does not have layout
+    /// information. Canonicalizing the type at the level of std when going into
+    /// a library call avoids needing to introduce DialectCastOp.
     if (auto memrefType = type.dyn_cast<MemRefType>())
-      result.push_back(eraseStridedLayout(memrefType));
+      result.push_back(makeStridedLayoutDynamic(memrefType));
     else
       result.push_back(type);
   }
+
   return result;
 }
 
@@ -167,95 +354,116 @@ createTypeCanonicalizedMemRefOperands(OpBuilder &b, Location loc,
       continue;
     }
     Value cast =
-        b.create<memref::CastOp>(loc, eraseStridedLayout(memrefType), op);
+        b.create<memref::CastOp>(loc, makeStridedLayoutDynamic(memrefType), op);
     res.push_back(cast);
   }
   return res;
 }
 
-// Get a SymbolRefAttr containing the library function name for the LinalgOp.
-// If the library function does not exist, insert a declaration.
-static FlatSymbolRefAttr getLibraryCallSymbolRef(Operation *op,
-                                                 PatternRewriter &rewriter)
+/// Get a SymbolRefAttr containing the library function name for the LinalgOp.
+/// If the library function does not exist, insert a declaration.
+static FailureOr<FlatSymbolRefAttr> getLibraryCallSymbolRef(Operation *op, PatternRewriter &rewriter)
 {
-  auto linalgOp = cast<LinalgOp>(op);
-  auto fnName = linalgOp.getLibraryCallName();
+  auto fnName = linalgMatmulUkrFname;
   if (fnName.empty())
-  {
-    op->emitWarning("No library call defined for: ") << *op;
-    return {};
-  }
+    return rewriter.notifyMatchFailure(op, "No library call defined for: ");
 
-  // fnName is a dynamic std::string, unique it via a SymbolRefAttr.
-  FlatSymbolRefAttr fnNameAttr = rewriter.getSymbolRefAttr(fnName);
+  /// fnName is a dynamic std::string, unique it via a SymbolRefAttr.
+  FlatSymbolRefAttr fnNameAttr =
+      SymbolRefAttr::get(rewriter.getContext(), fnName);
   auto module = op->getParentOfType<ModuleOp>();
-  if (module.lookupSymbol(fnName))
-  {
+  if (module.lookupSymbol(fnNameAttr.getAttr()))
     return fnNameAttr;
-  }
 
   SmallVector<Type, 4> inputTypes(extractOperandTypes(op));
-  assert(op->getNumResults() == 0 &&
-         "Library call for linalg operation can be generated only for ops that "
-         "have void return types");
+
+  /// Add inputTypes for mr and nr
+  inputTypes.push_back(IntegerType::get(rewriter.getContext(), 32));
+  inputTypes.push_back(IntegerType::get(rewriter.getContext(), 32));
+
+  if (op->getNumResults() != 0)
+  {
+    return rewriter.notifyMatchFailure(
+        op,
+        "Library call for linalg operation can be generated only for ops that "
+        "have void return types");
+  }
   auto libFnType = rewriter.getFunctionType(inputTypes, {});
 
   OpBuilder::InsertionGuard guard(rewriter);
-  // Insert before module terminator.
+  /// Insert before module terminator.
   rewriter.setInsertionPoint(module.getBody(),
                              std::prev(module.getBody()->end()));
-  FuncOp funcOp =
-      rewriter.create<FuncOp>(op->getLoc(), fnNameAttr.getValue(), libFnType);
-  // Insert a function attribute that will trigger the emission of the
-  // corresponding `_mlir_ciface_xxx` interface so that external libraries see
-  // a normalized ABI. This interface is added during std to llvm conversion.
-  funcOp->setAttr("llvm.emit_c_interface", UnitAttr::get(op->getContext()));
+  func::FuncOp funcOp = rewriter.create<func::FuncOp>(
+      op->getLoc(), fnNameAttr.getValue(), libFnType);
+  /// Insert a function attribute that will trigger the emission of the
+  /// corresponding `_mlir_ciface_xxx` interface so that external libraries see
+  /// a normalized ABI. This interface is added during std to llvm conversion.
+  funcOp->setAttr(LLVM::LLVMDialect::getEmitCWrapperAttrName(),
+                  UnitAttr::get(op->getContext()));
   funcOp.setPrivate();
   return fnNameAttr;
 }
 
-LogicalResult LinalgMatMulOpToLibraryCallRewrite::matchAndRewrite(
+LogicalResult LinalgMatMulOpToLibraryCallPattern::matchAndRewrite(
     MatmulOp op, PatternRewriter &rewriter) const
 {
   if (!isa<MatmulOp>(op))
     return failure();
 
   auto libraryCallName = getLibraryCallSymbolRef(op, rewriter);
-  if (!libraryCallName)
+  if (failed(libraryCallName))
     return failure();
 
-  // TODO(gkestor): Add support for more complex library call signatures that include
-  // indices or captured values.
-  rewriter.replaceOpWithNewOp<mlir::CallOp>(
-      op, libraryCallName.getValue(), TypeRange(),
-      createTypeCanonicalizedMemRefOperands(rewriter, op->getLoc(),
-                                            op->getOperands()));
+  int mc, kc, nc, mr, nr = 0;
+  get_level3_blocksizes(&mc, &kc, &nc, &mr, &nr, sizeof(double));
+
+  IntegerType i32Type = IntegerType::get(rewriter.getContext(), 32);
+  Value mrValue = rewriter.create<ConstantOp>(op->getLoc(), i32Type, rewriter.getIntegerAttr(i32Type, mr));
+  Value nrValue = rewriter.create<ConstantOp>(op->getLoc(), i32Type, rewriter.getIntegerAttr(i32Type, nr));
+
+  comet_vdump(mrValue);
+  comet_vdump(nrValue);
+
+  std::vector<Value> operands;
+  operands.insert(operands.end(), op->getOperands().begin(), op->getOperands().end());
+  operands.push_back(mrValue);
+  operands.push_back(nrValue);
+
+  rewriter.replaceOpWithNewOp<func::CallOp>(
+      op, libraryCallName->getValue(), TypeRange(),
+      createTypeCanonicalizedMemRefOperands(rewriter, op->getLoc(), operands));
   return success();
 }
 
 namespace
 {
-  class LinAlgMatmulMicroKernelPass : public PassWrapper<LinAlgMatmulMicroKernelPass, FunctionPass>
+  class LinAlgMatmulMicroKernelPass : public PassWrapper<LinAlgMatmulMicroKernelPass, OperationPass<func::FuncOp>>
   {
   public:
-    void runOnFunction() override
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinAlgMatmulMicroKernelPass)
+    void runOnOperation() override
     {
-      auto funcOp = getFunction();
-      MLIRContext *ctx = funcOp.getContext();
+      func::FuncOp func = getOperation();
+      MLIRContext *ctx = func.getContext();
 
-      OwningRewritePatternList patterns(&getContext());
+      RewritePatternSet patterns(&getContext());
 
-      // Replace the inner linalg.matmul with the blis microkernel
-      patterns.insert<LinalgMatMulOpToLibraryCallRewrite>(ctx);
-      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
+      /// Replace the inner linalg.matmul with the blis microkernel
+      patterns.insert<LinalgMatMulOpToLibraryCallPattern>(ctx);
+      (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
     }
   };
-} // end anonymous namespace
+} /// end anonymous namespace
+
+//===----------------------------------------------------------------------===//
+/// LinAlg.transpose Optimization
+//===----------------------------------------------------------------------===//
 
 struct OptDenseTranspose : public ConversionPattern
 {
   OptDenseTranspose(MLIRContext *ctx, uint64_t tile_size, bool seperate_tiles)
-      : ConversionPattern(CopyOp::getOperationName(), 1, ctx),
+      : ConversionPattern(linalg::TransposeOp::getOperationName(), 1, ctx),
         tile_size(tile_size), seperate_tiles(seperate_tiles) {}
 
   LogicalResult
@@ -263,84 +471,83 @@ struct OptDenseTranspose : public ConversionPattern
                   ConversionPatternRewriter &rewriter) const final
   {
     comet_debug() << " OptDenseTranspose : public ConversionPattern\n";
-    auto op = dyn_cast<linalg::CopyOp>(input_op);
+    auto op = dyn_cast<linalg::TransposeOp>(input_op);
     comet_debug() << " Lowering dense transpose\n";
-    assert(isa<linalg::CopyOp>(op) &&
-           "this operation is not CopyOp");
+    assert(isa<linalg::TransposeOp>(op) &&
+           "this operation is not a linalg.transpose");
 
-    assert(op.inputPermutation().hasValue() && op.outputPermutation().hasValue() &&
-           "this copy operation does not have input and/or output permutation");
-
-    // auto module = op->getParentOfType<ModuleOp>();
+    auto ctx = rewriter.getContext();
+    Builder builder(ctx);
     Location loc = op.getLoc();
+
     comet_vdump(op);
 
     auto inputType = op->getOperand(0).getType();
-    comet_debug() << " Input Type\n";
+    comet_debug() << " Input Type:\n";
     comet_vdump(inputType);
     auto inputMemref = op->getOperand(0);
+    auto inputRank = inputType.cast<mlir::MemRefType>().getRank();
     auto outputMemref = op->getOperand(1);
 
-    auto step = rewriter.create<ConstantIndexOp>(loc, 1);
     std::vector<AffineForOp> loops;
     std::vector<int64_t> indexIterateOrder;
-    for (int64_t rank = 0; rank < inputType.cast<mlir::MemRefType>().getRank(); rank++)
+    for (int64_t rank = 0; rank < inputRank; rank++)
     {
       indexIterateOrder.push_back(rank);
-      auto upperBound = inputType.cast<mlir::MemRefType>().getDimSize(rank);
-      if (upperBound == ShapedType::kDynamicSize)
+      int64_t upperBound = inputType.cast<mlir::MemRefType>().getDimSize(rank);
+      if (upperBound == ShapedType::kDynamic)
       {
         assert(false && "TODO: This dimension is a dynamic size");
       }
-      // create for loops
-      auto loop = rewriter.create<AffineForOp>(loc, 0, upperBound, step);
+      /// create for loops
+      auto loop = rewriter.create<AffineForOp>(loc, 0, upperBound, 1);
       loops.push_back(loop);
       comet_vdump(loop);
       rewriter.setInsertionPointToStart(loop.getBody());
     }
 
-    AffineMap inputIndexingMap = op.inputPermutation().getValue();
+    AffineMap inputIndexingMap = builder.getMultiDimIdentityMap(inputRank);
     auto inputIndices = getReassociationIndices(inputIndexingMap);
     auto inputIVs = createInductionVarAffine(loops, indexIterateOrder, inputIndices);
 
-    AffineMap outputIndexingMap = op.outputPermutation().getValue();
+    AffineMap outputIndexingMap = AffineMap::getPermutationMap(llvm::to_vector_of<unsigned>(op.getPermutation()), ctx);
     SmallVector<ReassociationIndices> outputIndices =
         getReassociationIndices(outputIndexingMap);
     auto outputIVs = createInductionVarAffine(loops, indexIterateOrder, outputIndices);
 
-    // Build loop body
+    /// Build loop body
     auto load_rhs = rewriter.create<memref::LoadOp>(loc, inputMemref, inputIVs);
-    #ifdef DEBUG_MODE_LINALGTRANSFORMS
+    comet_vdump(load_rhs);
+#ifdef DEBUG_MODE_LINALGTRANSFORMS
     comet_vdump(load_rhs);
     auto store_lhs = rewriter.create<memref::StoreOp>(loc, load_rhs, outputMemref, outputIVs);
     comet_vdump(store_lhs);
-    #else
+#else
     rewriter.create<memref::StoreOp>(loc, load_rhs, outputMemref, outputIVs);
-    #endif
+#endif
 
-    // CopyOp index permutation
-    AffineMap invmap = op.inputPermutation().getValue();
-    ArrayRef<AffineExpr> invresults = invmap.getResults();
+    /// TransposeOp index permutation
+    ArrayRef<AffineExpr> invresults = inputIndexingMap.getResults();
     std::vector<unsigned> sourceOrder;
     for (auto a : invresults)
     {
       if (a.getKind() == AffineExprKind::DimId)
       {
-        AffineDimExpr *b = (AffineDimExpr *)&a; // down_casting
+        AffineDimExpr *b = (AffineDimExpr *)&a; /// down_casting
         sourceOrder.push_back(b->getPosition());
         comet_debug() << "Source order: " << b->getPosition() << "\n";
       }
     }
 
-    AffineMap outvmap = op.outputPermutation().getValue();
-    ArrayRef<AffineExpr> outvresults = outvmap.getResults();
-    // From outer to inner, the destOrder[size -1] is the most important,
+    /// AffineMap outvmap = op.getPermutation().getValue();
+    ArrayRef<AffineExpr> outvresults = outputIndexingMap.getResults();
+    /// From outer to inner, the destOrder[size -1] is the most important,
     std::vector<unsigned> destOrder;
     for (auto a : outvresults)
     {
       if (a.getKind() == AffineExprKind::DimId)
       {
-        AffineDimExpr *b = (AffineDimExpr *)&a; // down_casting
+        AffineDimExpr *b = (AffineDimExpr *)&a; /// down_casting
         destOrder.push_back(b->getPosition());
         comet_debug() << "destination order: " << b->getPosition() << "\n";
       }
@@ -353,7 +560,7 @@ struct OptDenseTranspose : public ConversionPattern
       ** Then second step: a0, a1, a2, a3 (exchange loop order index 2 and 3)
       */
       std::vector<unsigned> optimalOrder = destOrder;
-      // Call an getLoopOrder algorithm to get the best order
+      /// Call an getLoopOrder algorithm to get the best order
       std::vector<std::vector<unsigned>> loopOrders;
       getLoopOrders(loopOrders, destOrder.size(), sourceOrder, destOrder);
       optimalOrder = loopOrders[0];
@@ -367,19 +574,19 @@ struct OptDenseTranspose : public ConversionPattern
       for (unsigned i = 0; i < optimalOrder.size(); i++)
       {
         comet_debug() << "currentOrder[i]: " << currentOrder[i] << " optimalOrder[i]: " << optimalOrder[i] << "\n";
-        // This loop index is the correct loop index, no loop interchange
+        /// This loop index is the correct loop index, no loop interchange
         if (optimalOrder[i] == currentOrder[i])
         {
           continue;
         }
         else
-        { // Get the location of the right loop index
+        { /// Get the location of the right loop index
           for (unsigned j = i + 1; j < currentOrder.size(); j++)
           {
             if (optimalOrder[i] == currentOrder[j])
-            { // loop j and i exchange
+            { /// loop j and i exchange
               unsigned k = j;
-              // k = (i,j]. k is unsigned, should be >= 0. use k-1, so k>=1
+              /// k = (i,j]. k is unsigned, should be >= 0. use k-1, so k>=1
               while (k > 0 && k > i)
               {
                 mlir::interchangeLoops(loops[currentOrder[k - 1]], loops[currentOrder[k]]);
@@ -399,7 +606,7 @@ struct OptDenseTranspose : public ConversionPattern
       }
       loops.clear();
 
-      // Possible to assign different tile size based on the dimension
+      /// Possible to assign different tile size based on the dimension
       if (tile_size > 1)
       {
         std::vector<unsigned> tileSizes;
@@ -407,15 +614,13 @@ struct OptDenseTranspose : public ConversionPattern
         {
           tileSizes.push_back(tile_size);
         }
-        // comet_vdump(newLoops[0]);
         SmallVector<AffineForOp, 6> tiledNest;
         if (failed(mlir::tilePerfectlyNested(newLoops, tileSizes, &tiledNest)))
           return failure();
 
-        // llvm::errs() << __FILE__ << " " << __LINE__ << " after tiling\n";
         comet_vdump(tiledNest[0]);
 
-        // Separate full and partial tiles.
+        /// Separate full and partial tiles.
         if (seperate_tiles)
         {
           auto intraTileLoops =
@@ -423,34 +628,38 @@ struct OptDenseTranspose : public ConversionPattern
           if (failed(separateFullTiles(intraTileLoops)))
             return failure();
         }
-      } // end if (tilesize > 1)
+      } /// end if (tilesize > 1)
 
-    } // end loops.size() < 0
+    } /// end loops.size() < 0
 
     rewriter.eraseOp(op);
+
+    /// module.dump();
     return success();
   }
 
 private:
   uint64_t tile_size;
   bool seperate_tiles;
-}; // Lower Dense Transpose to loops after optimizations
+}; /// Lower Dense Transpose to loops after optimizations
 
 namespace
 {
-  class OptDenseTransposePass : public PassWrapper<OptDenseTransposePass, FunctionPass>
+  class OptDenseTransposePass : public PassWrapper<OptDenseTransposePass, OperationPass<func::FuncOp>>
   {
   public:
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(OptDenseTransposePass)
     OptDenseTransposePass(uint64_t tile_size, bool seperate_tiles) : tile_size(tile_size), seperate_tiles(seperate_tiles){};
-    void runOnFunction() final
+    void runOnOperation() override
     {
       comet_debug() << "OptDenseTransposePass : public PassWrapper<OptDenseTransposePass, FunctionPass>\n";
+      func::FuncOp func = getOperation();
       ConversionTarget target(getContext());
-      target.addLegalDialect<StandardOpsDialect, AffineDialect, memref::MemRefDialect>();
-      OwningRewritePatternList patterns(&getContext());
+      target.addLegalDialect<ArithDialect, AffineDialect, memref::MemRefDialect>();
+      RewritePatternSet patterns(&getContext());
       patterns.insert<OptDenseTranspose>(&getContext(), tile_size, seperate_tiles);
 
-      if (failed(applyPartialConversion(getFunction(), target, std::move(patterns))))
+      if (failed(applyPartialConversion(func, target, std::move(patterns))))
       {
         llvm::errs() << "Failed to Lower dense transpose operation\n";
         signalPassFailure();
@@ -462,51 +671,26 @@ namespace
     uint64_t tile_size;
     bool seperate_tiles;
   };
-} // end anonymous namespace
-
-namespace
-{
-  class LowerLinAlgFillOpPass : public PassWrapper<LowerLinAlgFillOpPass, FunctionPass>
-  {
-  public:
-    void runOnFunction() override
-    {
-      auto funcOp = getFunction();
-      MLIRContext *ctx = funcOp.getContext();
-
-      OwningRewritePatternList patterns(&getContext());
-
-      // Add the patterns to the list lower linalg fill operation
-      patterns.insert<LinalgLoweringPattern<FillOp>>(ctx, LinalgLoweringType::Loops);
-      (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
-    }
-  };
-} // end anonymous namespace
+} /// end anonymous namespace
 
 /// Create a pass to optimize LinAlg Matmul Op with tiling
-std::unique_ptr<mlir::Pass> mlir::tensorAlgebra::createLinAlgMatmulTilingPass()
+std::unique_ptr<mlir::Pass> mlir::comet::createLinAlgMatmulTilingPass()
 {
   return std::make_unique<LinAlgMatmulTilingPass>();
 }
 
 /// Create a pass to call a blis micro kernel for the inner linalg.matmul after tiling
-std::unique_ptr<mlir::Pass> mlir::tensorAlgebra::createLinAlgMatmulMicroKernelPass()
+std::unique_ptr<mlir::Pass> mlir::comet::createLinAlgMatmulMicroKernelPass()
 {
   return std::make_unique<LinAlgMatmulMicroKernelPass>();
 }
 
-/// Create a pass to optimize LinAlg Copy Op - follow in HPTT paper
+/// Create a pass to optimize LinAlg transposeOp - follow in HPTT paper
 /// HPTT: A High-Performance Tensor Transposition C++ Library
 /// https://arxiv.org/abs/1704.04374
-std::unique_ptr<mlir::Pass> mlir::tensorAlgebra::createOptDenseTransposePass(uint64_t tile_size,
-                                                                             bool seperate_tiles)
+std::unique_ptr<mlir::Pass> mlir::comet::createOptDenseTransposePass(uint64_t tile_size,
+                                                                     bool seperate_tiles)
 {
   comet_debug() << "LinAlgTransforms createOptDenseTransposePass\n";
   return std::make_unique<OptDenseTransposePass>(tile_size, seperate_tiles);
-}
-
-/// Create a pass to convert linalg.fill to loops
-std::unique_ptr<mlir::Pass> mlir::tensorAlgebra::createLowerLinAlgFillPass()
-{
-  return std::make_unique<LowerLinAlgFillOpPass>();
 }

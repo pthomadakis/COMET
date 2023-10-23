@@ -25,27 +25,27 @@
 
 #include "mlir/ExecutionEngine/RunnerUtils.h"
 
-// suppress all warnings coming from inclusion of blis.h in source tree
+/// suppress all warnings coming from inclusion of blis.h in source tree
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
-#include "comet/blis/blis.h"
+#pragma clang diagnostic ignored "-Wcast-qual"
+#include "blis.h"
 #endif
 
 #ifdef __GNUC__
-#pragma GCC diagnostic push 
+#pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wcast-qual"
 #pragma GCC diagnostic ignored "-Wtype-limits"
-#include "comet/blis/blis.h"
+#include "blis.h"
 #endif
 
 #ifdef _WIN32
 #ifndef COMET_BLIS_INTERFACE_EXPORT
 #ifdef comet_blis_interface_EXPORTS
-/* We are building this library */
 #define COMET_BLIS_INTERFACE_EXPORT __declspec(dllexport)
 #else
-/* We are using this library */
 #define COMET_BLIS_INTERFACE_EXPORT __declspec(dllimport)
 #endif // comet_blis_interface_EXPORTS
 #endif // COMET_BLIS_INTERFACE_EXPORT
@@ -66,4 +66,12 @@ _mlir_ciface_linalg_matmul_viewsxsxf64_viewsxsxf64_viewsxsxf64(
 #pragma GCC diagnostic pop
 #endif
 
-#endif // COMET_BLIS_INTERFACE_H_
+#endif /// COMET_BLIS_INTERFACE_H_
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
+#define bli_dgemm_asm_6x8 bli_dgemm_x86_ukr
+#elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_ARCH_PPC)
+#define bli_dgemm_asm_6x8 bli_dgemm_arm_ukr
+#else
+#define bli_dgemm_asm_6x8 dgemm_generic_noopt_mxn
+#endif

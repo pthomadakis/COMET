@@ -1,28 +1,28 @@
 //===- MLIRGen.cpp - MLIR Generation from a COMET language AST
 //
-// Copyright 2022 Battelle Memorial Institute
+/// Copyright 2022 Battelle Memorial Institute
 //
-// Redistribution and use in source and binary forms, with or without modification,
-// are permitted provided that the following conditions are met:
+/// Redistribution and use in source and binary forms, with or without modification,
+/// are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this list of conditions
-// and the following disclaimer.
+/// 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+/// and the following disclaimer.
 //
-// 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions
-// and the following disclaimer in the documentation and/or other materials provided with the distribution.
+/// 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions
+/// and the following disclaimer in the documentation and/or other materials provided with the distribution.
 //
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
-// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+/// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+/// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+/// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+/// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+/// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+/// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
-// =============================================================================
+/// =============================================================================
 //
-// This file implements a simple IR generation targeting MLIR from a Module AST
-// for COMET DSL.
+/// This file implements a simple IR generation targeting MLIR from a Module AST
+/// for COMET DSL.
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,11 +30,12 @@
 
 #include "MLIRGen.h"
 #include "AST.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "comet/Dialect/TensorAlgebra/IR/TADialect.h"
-#include "comet/Dialect/Utils/Utils.h"
 
-#include "mlir/Dialect/Shape/IR/Shape.h"
+#include "comet/Dialect/Utils/Utils.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
@@ -47,19 +48,21 @@
 #include "llvm/Support/raw_ostream.h"
 #include <map>
 #include <numeric>
-#include <cstdlib> // for random num generation
-#include <random>  // for seed of random num generation
+#include <cstdlib> /// for random num generation
+#include <random>  /// for seed of random num generation
 
 #include "mlir/IR/Types.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Verifier.h"
 
 using namespace mlir::tensorAlgebra;
 using namespace tensorAlgebra;
+using namespace mlir::arith;
 
 using llvm::ArrayRef;
 using llvm::cast;
 using llvm::dyn_cast;
 using llvm::isa;
-using llvm::makeArrayRef;
 using llvm::ScopedHashTableScope;
 using llvm::SmallVector;
 using llvm::StringRef;
@@ -68,28 +71,13 @@ using llvm::Twine;
 using StringSet = std::set<std::string>;
 
 // *********** For debug purpose *********//
-// #ifndef DEBUG_MODE_MLIRGEN
-// #define DEBUG_MODE_MLIRGEN
-// #endif
-
-#ifdef DEBUG_MODE_MLIRGEN
-#define comet_debug() llvm::errs() << __FILE__ << " " << __LINE__ << " "
-#define comet_pdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n->dump()
-#define comet_vdump(n)                                \
-  llvm::errs() << __FILE__ << " " << __LINE__ << " "; \
-  n.dump()
-#else
-#define comet_debug() llvm::nulls()
-#define comet_pdump(n)
-#define comet_vdump(n)
-#endif
+//#define COMET_DEBUG_MODE
+#include "comet/Utils/debug.h"
+#undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
 
 namespace
 {
-
   enum class ElType
   {
     inv = 0b1000,
@@ -140,7 +128,7 @@ namespace
       opName = "noop";
       break;
     default:
-      llvm::errs() << "[ERR] Semiring operator number not defined \n";
+      llvm::errs() << __FILE__ << ":" << __LINE__ << "ERROR: Semiring operator number not defined \n";
     }
     comet_debug() << "Semiring op name: " << opName << "\n";
     return opName;
@@ -151,35 +139,35 @@ namespace
     return ElType(static_cast<int>(first) | static_cast<int>(second));
   }
 
-  /// Implementation of a simple MLIR emission from the Tensor Algebra AST.
+  // Implementation of a simple MLIR emission from the Tensor Algebra AST.
   ///
-  /// This will emit operations that are specific to the Tensor Algebra language,
-  /// preserving the semantics of the language and (hopefully) allow to perform
-  /// accurate analysis and transformation based on these high level semantics.
+  // This will emit operations that are specific to the Tensor Algebra language,
+  // preserving the semantics of the language and (hopefully) allow to perform
+  // accurate analysis and transformation based on these high level semantics.
   class MLIRGenImpl
   {
   public:
     MLIRGenImpl(mlir::MLIRContext &context) : builder(&context) {}
 
-    /// Public API: convert the AST for a Tensor Algebra module (source file) to
-    /// an MLIR Module operation.
+    // Public API: convert the AST for a Toy module (source file) to an MLIR
+    // Module operation.
     mlir::ModuleOp mlirGen(ModuleAST &moduleAST)
     {
-      // We create an empty MLIR module and codegen functions one at a time and
-      // add them to the module.
+      /// We create an empty MLIR module and codegen functions one at a time and
+      /// add them to the module.
       theModule = mlir::ModuleOp::create(builder.getUnknownLoc());
 
-      for (FunctionAST &F : moduleAST)
+      for (FunctionAST &funcAST : moduleAST)
       {
-        auto func = mlirGen(F);
+        mlir::tensorAlgebra::FuncOp func = mlirGen(funcAST);
         if (!func)
           return nullptr;
-        theModule.push_back(func);
+        functionMap.insert({func.getName(), func});
       }
 
-      // Verify the module after we have finished constructing it, this will check
-      // the structural properties of the IR and invoke any specific verifiers we
-      // have on the Tensor Algebra operations.
+      /// Verify the module after we have finished constructing it, this will check
+      /// the structural properties of the IR and invoke any specific verifiers we
+      /// have on the Toy operations.
       if (failed(mlir::verify(theModule)))
       {
         theModule.emitError("module verification error");
@@ -205,22 +193,23 @@ namespace
     /// scope is destroyed and the mappings created in this scope are dropped.
     llvm::ScopedHashTable<StringRef, mlir::Value> symbolTable;
 
-    /// Helper conversion for a Tensor Algebra AST location to an MLIR location.
-    mlir::Location loc(Location loc)
+    /// A mapping for the functions that have been code generated to MLIR.
+    llvm::StringMap<mlir::tensorAlgebra::FuncOp> functionMap;
+
+    // Helper conversion for a Tensor Algebra AST location to an MLIR location.
+    mlir::Location loc(const Location &loc)
     {
-      // return builder.getFileLineColLoc(builder.getIdentifier(*loc.file), loc.line,
-      //                                  loc.col);
-      return mlir::FileLineColLoc::get(builder.getIdentifier(*loc.file), loc.line,
+      return mlir::FileLineColLoc::get(builder.getStringAttr(*loc.file), loc.line,
                                        loc.col);
     }
 
-    // For scalar-arithmetic-op:
-    // var a = 0; and c = a + b; are all specified in VarDeclExprAST
-    // in which all var are added to the symboltable; in this case,
-    // a is added twice. So, we cannot return failure for this case if found
-    // an existing variable from the symbol table.
-    // Change to:
-    // If not exist, add the variable to symbol table; return success anyway
+    /// For scalar-arithmetic-op:
+    /// var a = 0; and c = a + b; are all specified in VarDeclExprAST
+    /// in which all var are added to the symboltable; in this case,
+    /// a is added twice. So, we cannot return failure for this case if found
+    /// an existing variable from the symbol table.
+    /// Change to:
+    /// If not exist, add the variable to symbol table; return success anyway
     mlir::LogicalResult declare(llvm::StringRef var, mlir::Value value)
     {
       if (!symbolTable.count(var))
@@ -232,59 +221,63 @@ namespace
 
     /// Create the prototype for an MLIR function with as many arguments as the
     /// provided Tensor Algebra AST prototype.
-    mlir::FuncOp mlirGen(PrototypeAST &proto)
+    mlir::tensorAlgebra::FuncOp mlirGen(PrototypeAST &proto)
     {
       auto location = loc(proto.loc());
 
-      // This is a generic function, the return type will be inferred later.
-      // Arguments type are uniformly unranked tensors.
+      /// This is a generic function, the return type will be inferred later.
+      /// Arguments type are uniformly unranked tensors.
       llvm::SmallVector<mlir::Type, 4> arg_types(proto.getArgs().size(),
                                                  getType(VarType{}));
-      auto func_type = builder.getFunctionType(arg_types, llvm::None);
-      return mlir::FuncOp::create(location, proto.getName(), func_type);
+      auto func_type = builder.getFunctionType(arg_types, std::nullopt);
+      return builder.create<mlir::tensorAlgebra::FuncOp>(location, proto.getName(),
+                                                         func_type);
     }
 
     /// Emit a new function and add it to the MLIR module.
-    mlir::FuncOp mlirGen(FunctionAST &funcAST)
+    mlir::tensorAlgebra::FuncOp mlirGen(FunctionAST &funcAST)
     {
-      // Create a scope in the symbol table to hold variable declarations.
-      ScopedHashTableScope<llvm::StringRef, mlir::Value> var_scope(symbolTable);
+      /// Create a scope in the symbol table to hold variable declarations.
+      /// SymbolTableScopeT varScope(symbolTable);
+      /// Create a scope in the symbol table to hold variable declarations.
+      ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(symbolTable);
 
-      // Create an MLIR function for the given prototype.
-      mlir::FuncOp function(mlirGen(*funcAST.getProto()));
+      /// Create an MLIR function for the given prototype.
+      builder.setInsertionPointToEnd(theModule.getBody());
+      mlir::tensorAlgebra::FuncOp function = mlirGen(*funcAST.getProto());
       if (!function)
         return nullptr;
 
-      // Let's start the body of the function now!
-      // In MLIR the entry block of the function is special: it must have the same
-      // argument list as the function itself.
-      auto &entryBlock = *function.addEntryBlock();
+      /// Let's start the body of the function now!
+      mlir::Block &entryBlock = function.front();
       auto &protoArgs = funcAST.getProto()->getArgs();
 
-      // Declare all the function arguments in the symbol table.
-      for (const auto name_value :
+      // function.
+      /// Declare all the function arguments in the symbol table.
+      for (const auto nameValue :
            llvm::zip(protoArgs, entryBlock.getArguments()))
       {
-        if (failed(declare(std::get<0>(name_value)->getName(),
-                           std::get<1>(name_value))))
+        comet_debug() << "Proto Args " << std::get<1>(nameValue) << "\n";
+        if (failed(declare(std::get<0>(nameValue)->getName(),
+                           std::get<1>(nameValue))))
           return nullptr;
       }
 
-      // Set the insertion point in the builder to the beginning of the function
-      // body, it will be used throughout the codegen to create operations in this
-      // function.
+      /// Set the insertion point in the builder to the beginning of the function
+      /// body, it will be used throughout the codegen to create operations in this
+      /// function.
       builder.setInsertionPointToStart(&entryBlock);
 
-      // Emit the body of the function.
+      /// Emit the body of the function.
       if (mlir::failed(mlirGen(*funcAST.getBody())))
       {
         function.erase();
         return nullptr;
       }
 
-      // Implicitly return void if no return statement was emitted.
-      // FIXME: we may fix the parser instead to always return the last expression
-      // (this would possibly help the REPL case later)
+      /// Implicitly return void if no return statement was emitted.
+      /// FIXME: we may fix the parser instead to always return the last expression
+      /// (this would possibly help the REPL case later)
       TAReturnOp returnOp;
       if (!entryBlock.empty())
         returnOp = dyn_cast<TAReturnOp>(entryBlock.back());
@@ -294,31 +287,36 @@ namespace
       }
       else if (returnOp.hasOperand())
       {
-        // Otherwise, if this return operation has an operand then add a result to
-        // the function.
-        function.setType(builder.getFunctionType(function.getType().getInputs(),
-                                                 getType(VarType{})));
+        /// Otherwise, if this return operation has an operand then add a result to
+        /// the function.
+        function.setType(
+            builder.getFunctionType(function.getFunctionType().getInputs(),
+                                    *returnOp.operand_type_begin()));
       }
+
+      /// If this function isn't main, then set the visibility to private.
+      if (funcAST.getProto()->getName() != "main")
+        function.setPrivate();
 
       return function;
     }
 
-    /// Emit a binary operation
+    // Emit a binary operation
     mlir::Value mlirGen(BinaryExprAST &binop,
                         const std::set<std::string> &out_lbls = {}, std::string out_format = "")
     {
       comet_debug() << " mlirGen for  BinaryExprAST \n";
-      // First emit the operations for each side of the operation before emitting
-      // the operation itself. For example if the expression is `a + foo(a)`
-      // 1) First it will visiting the LHS, which will return a reference to the
-      //    value holding `a`. This value should have been emitted at declaration
-      //    time and registered in the symbol table, so nothing would be
-      //    codegen'd. If the value is not in the symbol table, an error has been
-      //    emitted and nullptr is returned.
-      // 2) Then the RHS is visited (recursively) and a call to `foo` is emitted
-      //    and the result value is returned. If an error occurs we get a nullptr
-      //    and propagate.
-      //
+      /// First emit the operations for each side of the operation before emitting
+      /// the operation itself. For example if the expression is `a + foo(a)`
+      /// 1) First it will visiting the LHS, which will return a reference to the
+      ///   value holding `a`. This value should have been emitted at declaration
+      ///   time and registered in the symbol table, so nothing would be
+      ///   codegen'd. If the value is not in the symbol table, an error has been
+      ///   emitted and nullptr is returned.
+      /// 2) Then the RHS is visited (recursively) and a call to `foo` is emitted
+      ///   and the result value is returned. If an error occurs we get a nullptr
+      ///   and propagate.
+      ///
       std::set<std::string> rhs_lbls{out_lbls};
       std::set<std::string> lhs_lbls{out_lbls};
       auto *lhsAST = binop.getLHS();
@@ -439,15 +437,15 @@ namespace
         comet_vdump(rhs);
         comet_vdump(lhs);
 
-        // lookup the output of the binary operation
+        /// lookup the output of the binary operation
         auto theOutput = symbolTable.lookup(out_format);
         if (theOutput == nullptr)
-        { // the variable for output of binary operation was not declared by user,
-          // we will create a new DenseConstantOp here.
+        { /// the variable for output of binary operation was not declared by user,
+          /// we will create a new DenseConstantOp here.
           comet_debug() << "creating a new variable declaration, since the user did not declare it\n";
 
           double data = 0.0;
-          auto dataAttribute = mlir::DenseElementsAttr::get(returnDataType, llvm::makeArrayRef(data));
+          auto dataAttribute = mlir::DenseElementsAttr::get(returnDataType, llvm::ArrayRef(data));
           auto denseConst = builder.create<DenseConstantOp>(location, returnDataType, dataAttribute);
 
           theOutput = denseConst;
@@ -457,54 +455,25 @@ namespace
         comet_vdump(scalarOp);
         builder.create<TensorSetOp>(location, scalarOp, theOutput);
 
-        // the value returned here will be used in subsequent ops.
-        // for example, in the code below, 'g' should be returned.
-        //    $ var g = a + b;
-        //    $ print(g);
+        /// the value returned here will be used in subsequent ops.
+        /// for example, in the code below, 'g' should be returned.
+        ///   $ var g = a + b;
+        ///   $ print(g);
         return theOutput;
       }
 
       else if (isa<DenseConstantOp>(lhs.getDefiningOp()))
       {
-        assert(false);
-        // comet_debug() << "\n"
-        //               << __LINE__ << " lhs is DenseConstantOp\n";
-        // switch (binop.getOp())
-        // {
-        // // TODO(gkestor): Why mulop called chainMulOp but not the others
-        // case '+':
-        //   return builder.create<AddOp>(location, lhs, rhs);
-        // case '-':
-        //   return builder.create<SubtractOp>(location, lhs, rhs);
-        // case '*':
-        //   // TODO(gkestor): create general elementwise multiplication ops
-        //   // return builder.create<MulOp>(location, lhs, rhs);
-        //   return builder.create<AddOp>(location, lhs, rhs);
-        // case '/':
-        //   return builder.create<DivOp>(location, lhs, rhs);
-        // }
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Unexpected case\n";
       }
       else if (isa<DenseConstantOp>(rhs.getDefiningOp()))
       {
-        assert(false);
-        // comet_debug() << "\n"
-        //               << __LINE__ << " rhs is DenseConstantOp\n";
-        // switch (binop.getOp())
-        // {
-        // case '+':
-        //   return builder.create<AddOp>(location, lhs, rhs);
-        // case '-':
-        //   return builder.create<SubtractOp>(location, lhs, rhs);
-        // case '*':
-        //   return builder.create<ChainMulOp>(location, lhs, rhs);
-        // case '/':
-        //   return builder.create<DivOp>(location, lhs, rhs);
-        // }
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Unexpected case\n";
       }
       else
       {
         comet_debug() << " lhs or rhs are binaryop\n";
-        // lhs && rhs are binaryop
+        /// lhs && rhs are binaryop
         std::set<mlir::Operation *> summed_labels;
 
         if (lhsAST->getKind() == ExprAST::ExprASTKind::Expr_BinOp)
@@ -516,16 +485,11 @@ namespace
           if (isa<ChainMulOp>(lhsOp))
           {
             auto lhsMulOp = cast<ChainMulOp>(lhsOp);
-            for (auto val : lhsMulOp.sum_labels())
+            for (auto val : lhsMulOp.getSumLabels())
             {
               summed_labels.insert(val.getDefiningOp());
             }
           }
-          // else if (isa<TensorAddOp>(lhsOp))
-          // {
-          //   // TODO(gkestor) check for AddOp
-          //   assert(false && "Not supported LHS operation\n");
-          // }
         }
         else
         {
@@ -541,7 +505,7 @@ namespace
           if (isa<ChainMulOp>(rhsOp))
           {
             auto rhsMulOp = cast<ChainMulOp>(rhsOp);
-            for (auto val : rhsMulOp.sum_labels())
+            for (auto val : rhsMulOp.getSumLabels())
             {
               summed_labels.insert(val.getDefiningOp());
             }
@@ -549,9 +513,9 @@ namespace
           else if (isa<TensorAddOp>(rhsOp))
           {
             // TODO(gkestor) check for AddOp
-            assert(false && "Not supported RHS operation\n");
+            llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Not supported RHS operation - Tensor addition\n";
           }
-          else if (isa<TransposeOp>(rhsOp))
+          else if (isa<mlir::tensorAlgebra::TransposeOp>(rhsOp))
           { // * transpose(A[i,j])
             comet_debug() << " "
                           << "\n";
@@ -650,7 +614,7 @@ namespace
 
         comet_debug() << __LINE__ << " binop.getOp(): " << binop.getOp() << "\n";
 
-        //TODO(gkestor): urgent refactor the following code
+        // TODO(gkestor): urgent refactor the following code
         std::vector<mlir::Value> lhs_lbls_value;
         if (isa<SparseTensorDeclOp, DenseTensorDeclOp>(lhs_labeledtensor.getDefiningOp()))
         {
@@ -683,9 +647,9 @@ namespace
             lhs_lbls_value.push_back(lhs_labeledtensor.getDefiningOp()->getOperand(i));
           }
         }
-        else if (isa<TransposeOp>(lhs_labeledtensor.getDefiningOp()))
+        else if (isa<mlir::tensorAlgebra::TransposeOp>(lhs_labeledtensor.getDefiningOp()))
         {
-          // check the output indices of ta.tc(), if it is
+          /// check the output indices of ta.tc(), if it is
           for (unsigned int i = 1; i < lhs_labeledtensor.getDefiningOp()->getNumOperands(); i++)
           {
 
@@ -695,7 +659,7 @@ namespace
         }
         else
         {
-          llvm::errs() << __FILE__ << __LINE__ << " unknown lhs \n";
+          llvm::errs() << __FILE__ << ":" << __LINE__ << " unknown lhs \n";
         }
 
         std::vector<mlir::Value> rhs_lbls_value;
@@ -723,7 +687,7 @@ namespace
                  isa<TensorAddOp>(rhs_labeledtensor.getDefiningOp()) ||
                  isa<TensorSubtractOp>(rhs_labeledtensor.getDefiningOp()))
         {
-          // check the output indices of ta.tc(), if it is
+          /// check the output indices of ta.tc(), if it is
           for (unsigned int i = 2; i < rhs_labeledtensor.getDefiningOp()->getNumOperands(); i++)
           {
 
@@ -731,9 +695,9 @@ namespace
             rhs_lbls_value.push_back(rhs_labeledtensor.getDefiningOp()->getOperand(i));
           }
         }
-        else if (isa<TransposeOp>(rhs_labeledtensor.getDefiningOp()))
+        else if (isa<mlir::tensorAlgebra::TransposeOp>(rhs_labeledtensor.getDefiningOp()))
         {
-          // check the output indices of ta.tc(), if it is
+          /// check the output indices of ta.tc(), if it is
           for (unsigned int i = 1; i < rhs_labeledtensor.getDefiningOp()->getNumOperands(); i++)
           {
 
@@ -743,7 +707,7 @@ namespace
         }
         else
         {
-          llvm::errs() << __FILE__ << __LINE__ << " unknown rhs \n";
+          llvm::errs() << __FILE__ << ":" << __LINE__ << " unknown rhs \n";
         }
 
         std::vector<mlir::Value> all_lbls_value;
@@ -866,8 +830,8 @@ namespace
           if (isa<DenseTensorDeclOp>(e.getDefiningOp()))
           {
             comet_debug() << " is TensorDeclOp\n";
-            // infer the format
-            auto lhs_format = dyn_cast<DenseTensorDeclOp>(e.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<DenseTensorDeclOp>(e.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
 
@@ -876,8 +840,8 @@ namespace
           else if (isa<SparseTensorDeclOp>(e.getDefiningOp()))
           {
             comet_debug() << " is TensorDeclOp\n";
-            // infer the format
-            auto lhs_format = dyn_cast<SparseTensorDeclOp>(e.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<SparseTensorDeclOp>(e.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
 
@@ -890,8 +854,8 @@ namespace
             if (isa<DenseTensorDeclOp>(tensordecl.getDefiningOp()))
             {
               comet_debug() << " is TensorDeclOp\n";
-              // infer the format
-              auto lhs_format = dyn_cast<DenseTensorDeclOp>(tensordecl.getDefiningOp()).format();
+              /// infer the format
+              auto lhs_format = dyn_cast<DenseTensorDeclOp>(tensordecl.getDefiningOp()).getFormat();
               comet_debug() << " lhs_format: " << lhs_format << "\n";
               formats.push_back(lhs_format);
 
@@ -900,8 +864,8 @@ namespace
             else if (isa<SparseTensorDeclOp>(tensordecl.getDefiningOp()))
             {
               comet_debug() << " is TensorDeclOp\n";
-              // infer the format
-              auto lhs_format = dyn_cast<SparseTensorDeclOp>(tensordecl.getDefiningOp()).format();
+              /// infer the format
+              auto lhs_format = dyn_cast<SparseTensorDeclOp>(tensordecl.getDefiningOp()).getFormat();
               comet_debug() << " lhs_format: " << lhs_format << "\n";
               formats.push_back(lhs_format);
 
@@ -910,10 +874,10 @@ namespace
             else if (isa<TensorMultOp>(tensordecl.getDefiningOp()))
             {
               comet_debug() << " is TensorMultOp\n";
-              // infer the format
-              mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorMultOp>(tensordecl.getDefiningOp()).formats();
+              /// infer the format
+              mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorMultOp>(tensordecl.getDefiningOp()).getFormats();
               unsigned int i = opFormatsArrayAttr.size() - 1;
-              std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+              mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
               comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
 
               comet_debug() << " lhs_format: " << lhs_format << "\n";
@@ -925,10 +889,10 @@ namespace
             {
               comet_debug() << " is TensorMultOp\n";
 
-              // infer the format
-              mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorElewsMultOp>(e.getDefiningOp()).formats();
+              /// infer the format
+              mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorElewsMultOp>(e.getDefiningOp()).getFormats();
               unsigned int i = opFormatsArrayAttr.size() - 1;
-              std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+              mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
               comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
 
               comet_debug() << " lhs_format: " << lhs_format << "\n";
@@ -943,10 +907,10 @@ namespace
           else if (isa<TensorMultOp>(e.getDefiningOp()))
           {
             comet_debug() << " is TensorMultOp\n";
-            // infer the format
-            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorMultOp>(e.getDefiningOp()).formats();
+            /// infer the format
+            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorMultOp>(e.getDefiningOp()).getFormats();
             unsigned int i = opFormatsArrayAttr.size() - 1;
-            std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+            mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
             comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
@@ -955,11 +919,11 @@ namespace
           }
           else if (isa<TensorElewsMultOp>(e.getDefiningOp()))
           {
-            comet_debug() << " is TensorMultOp\n";
-            // infer the format
-            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorElewsMultOp>(e.getDefiningOp()).formats();
+            comet_debug() << " is TensorElewsMultOp\n";
+            /// infer the format
+            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorElewsMultOp>(e.getDefiningOp()).getFormats();
             unsigned int i = opFormatsArrayAttr.size() - 1;
-            std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+            mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
             comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
 
             comet_debug() << " lhs_format: " << lhs_format << "\n";
@@ -969,11 +933,11 @@ namespace
           }
           else if (isa<TensorAddOp>(e.getDefiningOp()))
           {
-            comet_debug() << " is TensorMultOp\n";
-            // infer the format
-            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorAddOp>(e.getDefiningOp()).formats();
+            comet_debug() << " is TensorAddOp\n";
+            /// infer the format
+            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorAddOp>(e.getDefiningOp()).getFormats();
             unsigned int i = opFormatsArrayAttr.size() - 1;
-            std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+            mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
             comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
 
             comet_debug() << " lhs_format: " << lhs_format << "\n";
@@ -983,11 +947,11 @@ namespace
           }
           else if (isa<TensorSubtractOp>(e.getDefiningOp()))
           {
-            comet_debug() << " is TensorMultOp\n";
-            // infer the format
-            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorSubtractOp>(e.getDefiningOp()).formats();
+            comet_debug() << " is TensorSubstract Op\n";
+            /// infer the format
+            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TensorSubtractOp>(e.getDefiningOp()).getFormats();
             unsigned int i = opFormatsArrayAttr.size() - 1;
-            std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
+            mlir::StringRef lhs_format = opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue();
             comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
 
             comet_debug() << " lhs_format: " << lhs_format << "\n";
@@ -995,20 +959,39 @@ namespace
 
             tensors.push_back(dyn_cast<TensorSubtractOp>(e.getDefiningOp()).getOperation()->getResult(0));
           }
-          else if (isa<TransposeOp>(e.getDefiningOp()))
+          else if (isa<mlir::tensorAlgebra::TransposeOp>(e.getDefiningOp()))
           {
-            comet_debug() << " is TensorMultOp\n";
+            comet_debug() << " is TransposeOp\n";
 
-            // infer the format
-            mlir::ArrayAttr opFormatsArrayAttr = dyn_cast<TransposeOp>(e.getDefiningOp()).formats();
-            unsigned int i = opFormatsArrayAttr.size() - 1;
-            std::string lhs_format(opFormatsArrayAttr[i].cast<mlir::StringAttr>().getValue());
-            comet_debug() << __LINE__ << " lhs_format: " << lhs_format << "\n";
+            /// get the real transpose op output via the set op.
+            mlir::Value transposeOut;
+            mlir::Operation *firstUser = e.getDefiningOp()->getNextNode();
+            if (isa<TensorSetOp>(firstUser))
+            {
+              TensorSetOp setOp = cast<TensorSetOp>(firstUser);
+              transposeOut = setOp.getOperand(1);
+            }
+            else
+            {
+              llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Transpose has no set_op after it!\n";
+            }
 
-            comet_debug() << " lhs_format: " << lhs_format << "\n";
-            formats.push_back(lhs_format);
-
-            tensors.push_back(dyn_cast<TransposeOp>(e.getDefiningOp()).getOperation()->getResult(0));
+            /// get the format of transposeOut tensor
+            if (isa<DenseTensorDeclOp>(transposeOut.getDefiningOp()))
+            {
+              auto denseFormat = dyn_cast<DenseTensorDeclOp>(transposeOut.getDefiningOp()).getFormat();
+              formats.push_back(denseFormat);
+            }
+            else if (isa<SparseTensorDeclOp>(transposeOut.getDefiningOp()))
+            {
+              auto sparseFormat = dyn_cast<SparseTensorDeclOp>(transposeOut.getDefiningOp()).getFormat();
+              formats.push_back(sparseFormat);
+            }
+            else
+            {
+              llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Can not determine tensor format with transpose op\n";
+            }
+            tensors.push_back(transposeOut);
           }
           else
           {
@@ -1027,16 +1010,17 @@ namespace
         }
         else if (out_format.length() > 0) // non-empty format string provided.
         {
+          comet_debug() << " Output Format: " << out_format << "\n";
           formats.push_back(out_format);
         }
         else
         {
-          assert(false && " the format of output tensor could not be determined during generation of binOp");
+          llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: the format of output tensor could not be determined during generation of binOp\n";
         }
         comet_debug() << " formats.size(): " << formats.size() << "\n";
         auto strAttr = builder.getStrArrayAttr(formats);
 
-        assert(tensors.size() == 2 && " less than 2 input tensors for ta.tc or ta.elews_mul\n");
+        assert(tensors.size() == 2 && " less than 2 input tensors for ta.mul or ta.elews_mul\n");
 
         std::vector<mlir::Value> labels;
         for (auto i : ret_lbls)
@@ -1045,20 +1029,25 @@ namespace
         }
 
         mlir::StringAttr SemiringAttr;
-        // Derive the operation name from the binary operator. At the moment we
-        // only support '+', '-','*'.
+        mlir::StringAttr MaskingAttr;
+        /// Derive the operation name from the binary operator. At the moment we
+        /// only support '+', '-','*'.
         switch (binop.getOp())
         {
         case '+':
           comet_debug() << "creating TensorAddOp\n";
           SemiringAttr = builder.getStringAttr("noop_plusxy"); // this is for standard elementwise addition
+          MaskingAttr = builder.getStringAttr("none");         // default for standard elementwise addition
           return builder.create<TensorAddOp>(location, ret_tensor_type, tensors[0], tensors[1],
-                                             labels, affineMapArrayAttr, strAttr, SemiringAttr);
+                                             labels, affineMapArrayAttr, strAttr, SemiringAttr,
+                                             MaskingAttr);
         case '-':
           comet_debug() << "creating TensorSubtractOp\n";
           SemiringAttr = builder.getStringAttr("noop_minus"); // this is for standard elementwise subtraction
+          MaskingAttr = builder.getStringAttr("none");        // default for standard elementwise subtraction
           return builder.create<TensorSubtractOp>(location, ret_tensor_type, tensors[0], tensors[1],
-                                                  labels, affineMapArrayAttr, strAttr, SemiringAttr);
+                                                  labels, affineMapArrayAttr, strAttr, SemiringAttr,
+                                                  MaskingAttr);
         case '*':
         {
           comet_vdump(lhs_tensor);
@@ -1067,8 +1056,10 @@ namespace
           comet_vdump(rhs_tensor);
           comet_debug() << "\n";
           SemiringAttr = builder.getStringAttr("plusxy_times"); // this is for standard matrix multiplication
+          MaskingAttr = builder.getStringAttr("none");          // default for standard matrix multiplication
           mlir::Value tcop = builder.create<TensorMultOp>(location, ret_tensor_type, tensors[0], tensors[1],
-                                                          labels, affineMapArrayAttr, strAttr, SemiringAttr);
+                                                          labels, affineMapArrayAttr, strAttr, SemiringAttr,
+                                                          MaskingAttr, nullptr); // TODO: masking is an optional operand
           tcop.getDefiningOp()->setAttr("__alpha__", builder.getF64FloatAttr(1.0));
           tcop.getDefiningOp()->setAttr("__beta__", builder.getF64FloatAttr(0.0));
 
@@ -1084,9 +1075,11 @@ namespace
 
           comet_vdump(rhs_tensor);
           comet_debug() << "\n";
-          auto SemiringAttr = builder.getStringAttr("noop_times"); // this is for standard element-wise multiplication
+          auto SemiringAttr = builder.getStringAttr("noop_times"); /// this is for standard element-wise multiplication
+          MaskingAttr = builder.getStringAttr("none");             /// default for standard element-wise multiplication
           mlir::Value tcop = builder.create<TensorElewsMultOp>(location, ret_tensor_type, tensors[0], tensors[1], labels,
-                                                               affineMapArrayAttr, strAttr, SemiringAttr);
+                                                               affineMapArrayAttr, strAttr, SemiringAttr,
+                                                               MaskingAttr);
 
           comet_vdump(tcop);
           return tcop;
@@ -1115,16 +1108,18 @@ namespace
     {
       auto location = loc(ret.loc());
 
-      // 'return' takes an optional expression, handle that case here.
+      /// 'return' takes an optional expression, handle that case here.
       mlir::Value expr = nullptr;
-      if (ret.getExpr().hasValue())
+      if (ret.getExpr().has_value())
       {
-        if (!(expr = mlirGen(*ret.getExpr().getValue())))
+        if (!(expr = mlirGen(**ret.getExpr())))
           return mlir::failure();
+
+        expr = builder.create<mlir::tensor::CastOp>(location, mlir::UnrankedTensorType::get(builder.getF64Type()), expr);
       }
 
-      // Otherwise, this return operation has zero operands.
-      builder.create<TAReturnOp>(location, expr ? makeArrayRef(expr)
+      /// Otherwise, this return operation has zero operands.
+      builder.create<TAReturnOp>(location, expr ? ArrayRef(expr)
                                                 : ArrayRef<mlir::Value>());
       return mlir::success();
     }
@@ -1135,34 +1130,34 @@ namespace
 
       auto type = getType(lit.getDims());
 
-      // The attribute is a vector with a floating point value per element
-      // (number) in the array, see `collectData()` below for more details.
+      /// The attribute is a vector with a floating point value per element
+      /// (number) in the array, see `collectData()` below for more details.
       std::vector<double> data;
       data.reserve(std::accumulate(lit.getDims().begin(), lit.getDims().end(), 1,
                                    std::multiplies<int>()));
       collectData(lit, data);
 
-      // The type of this attribute is tensor of 64-bit floating-point with the
-      // shape of the literal.
+      /// The type of this attribute is tensor of 64-bit floating-point with the
+      /// shape of the literal.
       mlir::Type elementType = builder.getF64Type();
       auto dataType = mlir::RankedTensorType::get(lit.getDims(), elementType);
 
-      // This is the actual attribute that holds the list of values for this
-      // tensor literal.
+      /// This is the actual attribute that holds the list of values for this
+      /// tensor literal.
       auto dataAttribute =
-          mlir::DenseElementsAttr::get(dataType, llvm::makeArrayRef(data));
+          mlir::DenseElementsAttr::get(dataType, llvm::ArrayRef(data));
 
-      // Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
-      // method.
+      /// Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
+      /// method.
       return builder.create<DenseConstantOp>(loc(lit.loc()), type, dataAttribute);
     }
 
     /// Recursive helper function to accumulate the data that compose an array
     /// literal. It flattens the nested structure in the supplied vector. For
     /// example with this array:
-    ///  [[1, 2], [3, 4]]
+    /// [[1, 2], [3, 4]]
     /// we will generate:
-    ///  [ 1, 2, 3, 4 ]
+    /// [ 1, 2, 3, 4 ]
     /// Individual numbers are represented as doubles.
     /// Attributes are the way MLIR attaches constant to operations.
     void collectData(ExprAST &expr, std::vector<double> &data)
@@ -1182,40 +1177,73 @@ namespace
     /// builtin. Other identifiers are assumed to be user-defined functions.
     mlir::Value mlirGen(CallExprAST &call)
     {
+      comet_debug() << "CallExprAST\n";
+
       llvm::StringRef callee = call.getCallee();
       auto location = loc(call.loc());
 
       mlir::Value sumVal;
       if (callee == "SUM")
       {
-        auto *expr = call.getArgs();
-        // Check if it SUM(A[i,j]) or SUM(A[i,j] * B[j,k])
-        // Case 1: SUM(A[i,j])
+        auto *expr = call.getArg(0);
+        /// Check if it SUM(A[i,j]) or SUM(A[i,j] * B[j,k])
+        /// Case 1: SUM(A[i,j])
         if (llvm::isa<LabeledTensorExprAST>(expr))
         {
           auto *rhsLT = llvm::cast<LabeledTensorExprAST>(expr);
           auto name = rhsLT->getTensorName();
           mlir::Value tensorValue = symbolTable.lookup(name);
           comet_debug() << " generate ta.sum op\n";
-          sumVal = builder.create<ReduceOp>(location, builder.getF64Type(), tensorValue);
+          /// TODO(gkestor): look at reduceOp in linalg
+          sumVal = builder.create<mlir::tensorAlgebra::ReduceOp>(location, builder.getF64Type(), tensorValue);
         }
 
-        // Case 2: SUM(A[i,j]*B[j,k])
+        /// Case 2: SUM(A[i,j]*B[j,k])
         if (llvm::isa<BinaryExprAST>(expr))
         {
           comet_debug() << " SUM parameter is a BinaryExprAST, Generate ta.SUM() \n";
-          // Generate ta.SUM
-          // parse binary
+          /// Generate ta.SUM
+          /// parse binary
           std::set<std::string> out_lbls = {};
           mlir::Value tensorValue = mlirGen(*expr, out_lbls);
           comet_debug() << " generate ta.sum op\n";
-          sumVal = builder.create<ReduceOp>(location, builder.getF64Type(), tensorValue);
+          sumVal = builder.create<mlir::tensorAlgebra::ReduceOp>(location, builder.getF64Type(), tensorValue);
+        }
+      }
+      else
+      {
+        std::vector<mlir::Value> expr_args;
+        comet_debug() << "Generic Call\n";
+        comet_debug() << "Num args: " << call.getNumArgs() << "\n";
+        if (call.getNumArgs() > 0)
+        {
+          for (size_t i = 0; i < call.getNumArgs(); i++)
+          {
+            auto res = builder.create<mlir::tensor::CastOp>(location, mlir::UnrankedTensorType::get(builder.getF64Type()), mlirGen(*call.getArg(i)));
+            expr_args.push_back(res);
+          }
+          comet_debug() << "Num args: " << call.getNumArgs() << "\n";
+        }
+        mlir::Value tensorValue;
+        tensorValue = mlir::Value();
+        ArrayRef<mlir::Value> args(expr_args);
+
+        auto c = functionMap.lookup(callee);
+        if (c.getFunctionType().getResults().size() > 0) /// Function that returns a value
+        {
+          auto res = builder.create<GenericCallOp>(location, c.getFunctionType().getResults()[0], callee, args);
+          sumVal = res.getResults()[0];
+        }
+        else /// Void function
+        {
+          builder.create<GenericCallOp>(location, callee, args);
+          sumVal = mlir::Value();
         }
       }
 
-      // Otherwise this is a call to a user-defined function. Calls to ser-defined
-      // functions are mapped to a custom call that takes the callee name as an
-      // attribute.
+      /// Otherwise this is a call to a user-defined function. Calls to ser-defined
+      /// functions are mapped to a custom call that takes the callee name as an
+      /// attribute.
       return sumVal;
     }
 
@@ -1237,18 +1265,18 @@ namespace
       auto type = getType(1);
       std::vector<double> data;
       data.push_back(num.getValue());
-      // The type of this attribute is tensor of 64-bit floating-point with the
-      // shape of one.
+      /// The type of this attribute is tensor of 64-bit floating-point with the
+      /// shape of one.
       mlir::Type elementType = builder.getF64Type();
       auto dataType = mlir::RankedTensorType::get(1, elementType);
 
-      // This is the actual attribute that holds the list of values for this
-      // tensor to represent scalar op.
+      /// This is the actual attribute that holds the list of values for this
+      /// tensor to represent scalar op.
       auto dataAttribute =
-          mlir::DenseElementsAttr::get(dataType, llvm::makeArrayRef(data));
+          mlir::DenseElementsAttr::get(dataType, llvm::ArrayRef(data));
 
-      // Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
-      // method.
+      /// Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
+      /// method.
       return builder.create<DenseConstantOp>(loc(num.loc()), type, dataAttribute);
     }
 
@@ -1269,7 +1297,7 @@ namespace
       }
       comet_debug() << " lhs is LabeledTensorOp \n";
 
-      // skip the use of labeledTensorOp in TensorSetOp
+      /// skip the use of labeledTensorOp in TensorSetOp
       mlir::Value lhs_decl;
       std::string out_format;
       if (isa<DenseTensorDeclOp>(lhs.getDefiningOp()->getOperand(0).getDefiningOp()))
@@ -1281,7 +1309,7 @@ namespace
       {
         lhs_decl = lhs.getDefiningOp()->getOperand(0);
         auto lhs_decl_op = cast<SparseTensorDeclOp>(lhs_decl.getDefiningOp());
-        std::string formatStr(lhs_decl_op.formatAttr().cast<mlir::StringAttr>().getValue());
+        std::string formatStr(lhs_decl_op.getFormatAttr().getValue());
         out_format = formatStr;
       }
       else
@@ -1456,22 +1484,13 @@ namespace
 
       std::set<std::string> out_lbls = {};
       llvm::StringRef out_var = vardecl.getName();
-      std::string out_varStr(out_var.str()); // the info of variable on the LHS.
+      std::string out_varStr(out_var.str()); /// the info of variable on the LHS.
       mlir::Value value = mlirGen(*init, out_lbls, out_varStr);
 
       if (!value)
         return nullptr;
 
-      // We have the initializer value, but in case the variable was declared
-      // with specific shape, we emit a "reshape" operation. It will get
-      // optimized out later as needed.
-      if (!vardecl.getType().shape.empty())
-      {
-        value = builder.create<ReshapeOp>(loc(vardecl.loc()),
-                                          getType(vardecl.getType()), value);
-      }
-
-      // Register the value in the symbol table.
+      /// Register the value in the symbol table.
       if (failed(declare(vardecl.getName(), value)))
         return nullptr;
       return value;
@@ -1481,21 +1500,22 @@ namespace
     mlir::Value mlirGen(IndexLabelDeclExprAST &labeldecl)
     {
 
-      mlir::Value lo = builder.create<mlir::ConstantIndexOp>(
+      mlir::Value lo = builder.create<ConstantIndexOp>(
           loc(labeldecl.loc()), labeldecl.getBegin());
-      mlir::Value hi = builder.create<mlir::ConstantIndexOp>(loc(labeldecl.loc()),
-                                                             labeldecl.getEnd());
-      mlir::Value step = builder.create<mlir::ConstantIndexOp>(
+
+      mlir::Value step = builder.create<ConstantIndexOp>(
           loc(labeldecl.loc()), labeldecl.getIncrement());
 
       mlir::Value value;
-      if (labeldecl.getEnd() == mlir::ShapedType::kDynamicSize)
+      if (labeldecl.getEnd() == mlir::ShapedType::kDynamic)
       {
         value =
             builder.create<IndexLabelDynamicOp>(loc(labeldecl.loc()), lo, step);
       }
       else
       {
+        mlir::Value hi = builder.create<ConstantIndexOp>(loc(labeldecl.loc()),
+                                                         labeldecl.getEnd());
         value =
             builder.create<IndexLabelStaticOp>(loc(labeldecl.loc()), lo, hi, step);
       }
@@ -1509,9 +1529,9 @@ namespace
     mlir::Value mlirGen(IndexLabelDeclDynamicExprAST &labeldecl)
     {
 
-      mlir::Value lo = builder.create<mlir::ConstantIndexOp>(
+      mlir::Value lo = builder.create<ConstantIndexOp>(
           loc(labeldecl.loc()), labeldecl.getBegin());
-      mlir::Value step = builder.create<mlir::ConstantIndexOp>(
+      mlir::Value step = builder.create<ConstantIndexOp>(
           loc(labeldecl.loc()), labeldecl.getIncrement());
 
       mlir::Value value =
@@ -1538,18 +1558,18 @@ namespace
             labels.push_back(var);
             auto range = cast<IndexLabelStaticOp>(var.getDefiningOp());
             auto min_idx =
-                cast<mlir::ConstantIndexOp>(range.min().getDefiningOp());
+                cast<ConstantIndexOp>(range.getMin().getDefiningOp());
             auto max_idx =
-                cast<mlir::ConstantIndexOp>(range.max().getDefiningOp());
+                cast<ConstantIndexOp>(range.getMax().getDefiningOp());
             auto step_idx =
-                cast<mlir::ConstantIndexOp>(range.step().getDefiningOp());
+                cast<ConstantIndexOp>(range.getStep().getDefiningOp());
 
-            auto min = min_idx.getValue();
-            auto max = max_idx.getValue();
-            auto step = step_idx.getValue();
-            if (max == mlir::ShapedType::kDynamicSize)
+            auto min = min_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+            auto max = max_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+            auto step = step_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+            if (max == mlir::ShapedType::kDynamic)
             {
-              dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+              dims_sizes.push_back(mlir::ShapedType::kDynamic);
             }
             else
             {
@@ -1559,7 +1579,7 @@ namespace
           else if (isa<IndexLabelDynamicOp>(var.getDefiningOp()))
           {
             labels.push_back(var);
-            dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+            dims_sizes.push_back(mlir::ShapedType::kDynamic);
           }
           else
           {
@@ -1583,8 +1603,8 @@ namespace
       std::string formats_str(tensor_format.data());
       if (isDense(formats_str, ", ") == false)
       {
-        // BoolAttr is false because there is explicit sparse densor declaration.
-        // SparseTensorDeclOp is not for temporaries in compound expressions
+        /// BoolAttr is false because there is explicit sparse densor declaration.
+        /// SparseTensorDeclOp is not for temporaries in compound expressions
         value = builder.create<SparseTensorDeclOp>(loc(tensordecl.loc()),
                                                    tensor_type, labels, tensor_format, false);
         comet_debug() << "MLIRGen SparseTensorDeclaration creation\n";
@@ -1603,7 +1623,7 @@ namespace
       return value;
     }
 
-    // Handle B[j, i] = tranpose(A[i,j], {j, i}) in DSL
+    /// Handle B[j, i] = tranpose(A[i,j], {j, i}) in DSL
     mlir::Value mlirGen(TransposeExprAST &transpose, LabeledTensorExprAST &lhsLT)
     {
       comet_debug() << "TransposeExprAST \n";
@@ -1648,20 +1668,20 @@ namespace
 
       SmallVector<mlir::StringRef, 8> formats;
 
-      // Firstly, Look at the rhs
+      /// Firstly, Look at the rhs
       if (isa<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
         comet_debug() << " is TensorDeclOp\n";
-        // infer the format
-        auto rhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// infer the format
+        auto rhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         comet_debug() << " rhs_format: " << rhs_format << "\n";
         formats.push_back(rhs_format);
       }
       else if (isa<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
         comet_debug() << " is TensorDeclOp\n";
-        // infer the format
-        auto rhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// infer the format
+        auto rhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         comet_debug() << " rhs_format: " << rhs_format << "\n";
         formats.push_back(rhs_format);
       }
@@ -1670,7 +1690,7 @@ namespace
         comet_debug() << " not TensorDeclOp\n";
       }
 
-      // Secondly, Look at the lhs
+      /// Secondly, Look at the lhs
       std::vector<LabeledTensorExprAST *> exprs{&lhsLT};
       std::vector<mlir::Value> lhs_lbls_value;
       for (auto e : exprs)
@@ -1679,12 +1699,11 @@ namespace
         mlir::Value lhsLT_op;
         if ((lhsLT_op = symbolTable.lookup(lhsLT_tensor_name)) != NULL)
         {
-          // comet_pdump(lhsLT_op.getDefiningOp());
           if (isa<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()))
           {
             comet_debug() << " is TensorDeclOp\n";
-            // infer the format
-            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
 
@@ -1696,8 +1715,8 @@ namespace
           else if (isa<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()))
           {
             comet_debug() << " is TensorDeclOp\n";
-            // infer the format
-            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
             for (unsigned int i = 0; i < lhsLT_op.getDefiningOp()->getNumOperands(); i++)
@@ -1714,19 +1733,18 @@ namespace
       comet_debug() << " formats.size(): " << formats.size() << "\n";
       auto strAttr = builder.getStrArrayAttr(formats);
 
-      // auto rhs_tensor = symbolTable.lookup(rhsLT->getTensorName());
       auto lhs_tensor = symbolTable.lookup(lhsLT.getTensorName());
 
       comet_debug() << " create TransposeOp\n";
-      mlir::Value t = builder.create<TransposeOp>(loc(transpose.loc()), lhs_tensor.getType(),
-                                                  rhs_tensor, lhs_lbls_value, affineMapArrayAttr, strAttr);
+      mlir::Value t = builder.create<mlir::tensorAlgebra::TransposeOp>(loc(transpose.loc()), lhs_tensor.getType(),
+                                                                       rhs_tensor, lhs_lbls_value, affineMapArrayAttr, strAttr);
       builder.create<TensorSetOp>(loc(transpose.loc()), t.getDefiningOp()->getResult(0), lhs_tensor);
       comet_vdump(t);
 
       return t;
     }
 
-    // Handle tranpose(A[i,j], {j, i}) in DSL, when no lhs_LabeledTensor has been created.
+    /// Handle tranpose(A[i,j], {j, i}) in DSL, when no lhs_LabeledTensor has been created.
     mlir::Value mlirGen(TransposeExprAST &transpose)
     {
       comet_debug() << "TransposeExprAST with no lhs labeled tensor \n";
@@ -1771,20 +1789,20 @@ namespace
 
       SmallVector<mlir::StringRef, 8> formats;
 
-      // Firstly, Look at the rhs
+      /// Firstly, Look at the rhs
       if (isa<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
         comet_debug() << " is TensorDeclOp\n";
-        // infer the format
-        auto rhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// infer the format
+        auto rhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         comet_debug() << " rhs_format: " << rhs_format << "\n";
         formats.push_back(rhs_format);
       }
       else if (isa<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
         comet_debug() << " is TensorDeclOp\n";
-        // infer the format
-        auto rhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// infer the format
+        auto rhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         comet_debug() << " rhs_format: " << rhs_format << "\n";
         formats.push_back(rhs_format);
       }
@@ -1793,8 +1811,8 @@ namespace
         comet_debug() << " not TensorDeclOp\n";
       }
 
-      // Secondly, Look at the lhs
-      // Collect labels values
+      /// Secondly, Look at the lhs
+      /// Collect labels values
       std::vector<mlir::Value> lhs_labels_val;
       for (const auto &lbl_str : lhs_lbls)
       {
@@ -1822,39 +1840,39 @@ namespace
         }
       }
 
-      // get return-type based on lhs-labels
+      /// get return-type based on lhs-labels
       std::vector<int64_t> result_dims = getDimSizes(lhs_labels_val);
       mlir::Type return_type = getType(result_dims);
 
-      // Create Tensor Declarations Ops and populate formats (for lhs)
+      /// Create Tensor Declarations Ops and populate formats (for lhs)
       mlir::Value lhs_tensor;
       if (isa<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
-        // for DenseTensorDeclOp create
-        mlir::StringRef format_strref = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// for DenseTensorDeclOp create
+        mlir::StringRef format_strref = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         mlir::StringAttr formatAttr = builder.getStringAttr(format_strref);
         lhs_tensor = builder.create<DenseTensorDeclOp>(loc(transpose.loc()), return_type, lhs_labels_val, formatAttr);
 
-        // populate formats
-        // assumes lhs and rhs formats are same
-        auto lhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// populate formats
+        /// assumes lhs and rhs formats are same
+        auto lhs_format = dyn_cast<DenseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         formats.push_back(lhs_format);
       }
       else if (isa<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()))
       {
-        // for SparseTensorDeclOp create
-        mlir::StringRef format_strref = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// for SparseTensorDeclOp create
+        mlir::StringRef format_strref = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         mlir::StringAttr formatAttr = builder.getStringAttr(format_strref);
 
-        // no lhs_LabeledTensor has been created. The output tensor of tranpose doesn't have explicit declaration,
-        // BoolAttr is true to speficy SparseTensorDeclOp is for temporaries
+        /// no lhs_LabeledTensor has been created. The output tensor of tranpose doesn't have explicit declaration,
+        /// BoolAttr is true to speficy SparseTensorDeclOp is for temporaries
         lhs_tensor = builder.create<SparseTensorDeclOp>(loc(transpose.loc()), return_type, lhs_labels_val, formatAttr, builder.getBoolAttr(true));
         comet_debug() << "MLIRGen SparseTensorDeclaration creation\n";
         comet_vdump(lhs_tensor);
 
-        // populate formats
-        // assumes lhs and rhs formats are same
-        auto lhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).format();
+        /// populate formats
+        /// assumes lhs and rhs formats are same
+        auto lhs_format = dyn_cast<SparseTensorDeclOp>(rhs_tensor.getDefiningOp()).getFormat();
         formats.push_back(lhs_format);
       }
 
@@ -1862,8 +1880,8 @@ namespace
       auto strAttr = builder.getStrArrayAttr(formats);
 
       comet_debug() << " create TransposeOp\n";
-      mlir::Value t = builder.create<TransposeOp>(loc(transpose.loc()), return_type,
-                                                  rhs_tensor, lhs_labels_val, affineMapArrayAttr, strAttr);
+      mlir::Value t = builder.create<mlir::tensorAlgebra::TransposeOp>(loc(transpose.loc()), return_type,
+                                                                       rhs_tensor, lhs_labels_val, affineMapArrayAttr, strAttr);
       builder.create<TensorSetOp>(loc(transpose.loc()), t.getDefiningOp()->getResult(0), lhs_tensor);
       comet_vdump(t);
 
@@ -1875,11 +1893,11 @@ namespace
     {
       comet_debug() << "codegen: ForLoopExprAST \n";
 
-      mlir::Value lo = builder.create<mlir::ConstantIndexOp>(
+      mlir::Value lo = builder.create<ConstantIndexOp>(
           loc(forLoop.loc()), forLoop.getBegin());
-      mlir::Value hi = builder.create<mlir::ConstantIndexOp>(loc(forLoop.loc()),
-                                                             forLoop.getEnd());
-      mlir::Value step = builder.create<mlir::ConstantIndexOp>(
+      mlir::Value hi = builder.create<ConstantIndexOp>(loc(forLoop.loc()),
+                                                       forLoop.getEnd());
+      mlir::Value step = builder.create<ConstantIndexOp>(
           loc(forLoop.loc()), forLoop.getIncrement());
 
       builder.create<ForLoopBeginOp>(loc(forLoop.loc()), lo, hi, step, forLoop.getName());
@@ -1905,9 +1923,9 @@ namespace
       ScopedHashTableScope<StringRef, mlir::Value> var_scope(symbolTable);
       for (auto &expr : blockAST)
       {
-        // Specific handling for variable declarations, return statement, and
-        // print. These can only appear in block list and not in nested
-        // expressions.
+        /// Specific handling for variable declarations, return statement, and
+        /// print. These can only appear in block list and not in nested
+        /// expressions.
 
         if (auto *labeldecl = dyn_cast<IndexLabelDeclExprAST>(expr.get()))
         {
@@ -2025,10 +2043,10 @@ namespace
               auto call = llvm::cast<FileReadExprAST>(tensor_op->getRHS());
               llvm::StringRef callee = call->getCallee();
 
-              int readModeVal = 1; // DEFAULT, standard matrix read
+              int readModeVal = 1; /// DEFAULT, standard matrix read
 
-              // Builting calls have their custom operation, meaning this is a
-              // straightforward emission.
+              /// Builting calls have their custom operation, meaning this is a
+              /// straightforward emission.
               if (callee == "comet_read")
               {
                 comet_debug() << " call comet_read \n";
@@ -2039,24 +2057,24 @@ namespace
 
                 std::string filenamestring;
                 llvm::StringRef filenamestr;
-                if (filename == nullptr) // no argument provided
+                if (filename == nullptr) /// no argument provided
                 {
                   comet_debug() << __LINE__ << " Empty filename\n";
                   filenamestring = "SPARSE_FILE_NAME";
                   filenamestr = filenamestring;
                 }
-                else if (filename != nullptr && readMode == nullptr) // only 1 arg provided
-                {                                                    // Not empty filename
+                else if (filename != nullptr && readMode == nullptr) /// only 1 arg provided
+                {                                                    /// Not empty filename
                   comet_debug() << __LINE__ << " One argument was provided in comet_read().\n";
 
-                  // User will provide num arg in comet_read()
-                  // that will be used to read file based on unique env vars.
-                  // e.g., comet_read(0) --> SPARSE_FILE_NAME0
+                  /// User will provide num arg in comet_read()
+                  /// that will be used to read file based on unique env vars.
+                  /// e.g., comet_read(0) --> SPARSE_FILE_NAME0
                   if (filename->getKind() == NumberExprAST::Expr_Num)
                   {
                     auto *filenameast = llvm::cast<NumberExprAST>(filename);
 
-                    // get arg val
+                    /// get arg val
                     int val = (int)cast<NumberExprAST>(filenameast)->getValue();
                     filenamestring = "SPARSE_FILE_NAME" + std::to_string(val);
                     filenamestr = filenamestring;
@@ -2072,19 +2090,19 @@ namespace
                   }
                   else
                   {
-                    assert(false && "un-recognized args provided to comet_read!");
+                    llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: unrecognized args provided to comet_read!\n";
                   }
                 }
-                else // 2 args provided to comet_read
+                else /// 2 args provided to comet_read
                 {
                   comet_debug() << " Two arguments were provided in comet_read().\n";
 
-                  // check 1st arg
+                  /// check 1st arg
                   if (filename->getKind() == NumberExprAST::Expr_Num)
                   {
                     auto *filenameast = llvm::cast<NumberExprAST>(filename);
 
-                    // get arg val
+                    /// get arg val
                     int val = (int)cast<NumberExprAST>(filenameast)->getValue();
                     filenamestring = "SPARSE_FILE_NAME" + std::to_string(val);
                     filenamestr = filenamestring;
@@ -2093,26 +2111,26 @@ namespace
                   }
                   else
                   {
-                    assert(false && "un-recognized args provided to comet_read!");
+                    llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: un-recognized args provided to comet_read!\n";
                   }
 
-                  // check 2nd arg
+                  /// check 2nd arg
                   if (readMode->getKind() == NumberExprAST::Expr_Num)
                   {
                     auto *readModeAST = llvm::cast<NumberExprAST>(readMode);
-                    // get arg val
+                    /// get arg val
                     readModeVal = (int)cast<NumberExprAST>(readModeAST)->getValue();
                   }
                   else
                   {
-                    assert(false && "un-recognized args provided to comet_read!");
+                    llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: un-recognized args provided to comet_read!\n";
                   }
                 }
 
                 if (mlir::failed(mlirGenTensorFillFromFile(loc(tensor_op->loc()), tensor_name, filenamestr, readModeVal)))
                   return mlir::success();
               }
-              // TODO: put check here, if the user mis-spells something...
+              /// TODO: put check here, if the user mis-spells something...
 
               continue;
             }
@@ -2132,13 +2150,20 @@ namespace
                 comet_debug() << " call random \n";
 
                 std::random_device os_seed;
-                srand(static_cast<unsigned>(os_seed())); // seed the random-num generator
-                                                         // something like time(0) does not work!
+                srand(static_cast<unsigned>(os_seed())); /// seed the random-num generator
+                                                         /// something like time(0) does not work!
 
                 if (mlir::failed(mlirGenTensorFillRandom(loc(tensor_op->loc()), tensor_name)))
                   return mlir::success();
               }
-              // TODO: put check here, if the user mis-spells something...
+              else
+              {
+                LabeledTensorExprAST *lhsLabeledTensorExprAST = llvm::cast<LabeledTensorExprAST>(tensor_op->getLHS());
+                auto call_res = mlirGen(*call);
+                auto lhs_tensor = symbolTable.lookup(lhsLabeledTensorExprAST->getTensorName());
+                builder.create<TensorSetOp>(loc(tensor_op->loc()), call_res, lhs_tensor);
+              }
+              /// TODO: put check here, if the user mis-spells something...
 
               continue;
             }
@@ -2147,22 +2172,34 @@ namespace
             else if (tensor_op->getRHS()->getKind() == ExprAST::ExprASTKind::Expr_Transpose)
             {
               comet_debug() << __LINE__ << "  in TensorOpExprAST, rhs is Expr_Transpose\n";
-              // create transpose op
+              /// create transpose op
               LabeledTensorExprAST *lhsLabeledTensorExprAST = llvm::cast<LabeledTensorExprAST>(tensor_op->getLHS());
 
               TransposeExprAST *transpose = llvm::cast<TransposeExprAST>(tensor_op->getRHS());
               mlirGen(*transpose, *lhsLabeledTensorExprAST);
               continue;
             }
+            else if (tensor_op->getRHS()->getKind() == ExprAST::ExprASTKind::Expr_Call)
+            {
+              comet_debug() << __LINE__ << "  in TensorOpExprAST, rhs is Expr_Call\n";
+
+              LabeledTensorExprAST *lhsLabeledTensorExprAST = llvm::cast<LabeledTensorExprAST>(tensor_op->getLHS());
+              CallExprAST *call = llvm::cast<CallExprAST>(tensor_op->getRHS());
+              auto call_res = mlirGen(*call);
+              auto lhs_tensor = symbolTable.lookup(lhsLabeledTensorExprAST->getTensorName());
+              builder.create<TensorSetOp>(loc(tensor_op->loc()), call_res, lhs_tensor);
+              continue;
+            }
+            /// TODO(gkestor): evaluate use of Expr_LabeledTensor for slicing
             else if ((tensor_op->getRHS()->getKind() == ExprAST::ExprASTKind::Expr_LabeledTensor &&
-                      tensor_op->getRHS()->getKind() == ExprAST::ExprASTKind::Expr_LabeledTensor))
+                      tensor_op->getLHS()->getKind() == ExprAST::ExprASTKind::Expr_LabeledTensor))
             {
 
               if (mlir::failed(mlirGenTensorarithexprs(*tensor_op)))
                 return mlir::success();
               continue;
             }
-            // there is a fall through case at the end, so don't put an else here.
+            /// there is a fall through case at the end, so don't put an else here.
           }
           else
           {
@@ -2170,10 +2207,12 @@ namespace
           }
         }
 
-        // Generic expression dispatch codegen.
+        /// Generic expression dispatch codegen.
         comet_debug() << " expr->getKind(): " << expr->getKind() << "\n";
-        if (!mlirGen(*expr))
-          return mlir::failure();
+
+        /// If calling a void function this will return null, thus we cannot count on this for
+        /// error checking
+        mlirGen(*expr);
       }
       return mlir::success();
     }
@@ -2181,18 +2220,22 @@ namespace
     /// Build a tensor type from a list of shape dimensions.
     mlir::Type getType(ArrayRef<int64_t> shape)
     {
-      // If the shape is empty, then this type is unranked.
+      /// If the shape is empty, then this type is unranked.
       if (shape.empty())
         return mlir::UnrankedTensorType::get(builder.getF64Type());
 
-      // Otherwise, we use the given shape.
+      /// Otherwise, we use the given shape.
       return mlir::RankedTensorType::get(shape, builder.getF64Type());
     }
 
     /// Build an MLIR type from a Tensor Algebra AST variable type (forward to the
     /// generic getType above).
-    mlir::Type getType(const VarType &type) { return getType(type.shape); }
+    mlir::Type getType(const VarType &type, const Location &location)
+    {
+      return getType(type.shape);
+    }
 
+    mlir::Type getType(const VarType &type) { return getType(type.shape); }
     /// Build an MLIR type from a Tensor Algebra AST variable type with respect to
     /// the element type
     mlir::Type getTensorType(const VarType &type)
@@ -2261,17 +2304,17 @@ namespace
         {
           comet_debug() << "\n";
           auto range = cast<IndexLabelStaticOp>(lbl.getDefiningOp());
-          auto min_idx = cast<mlir::ConstantIndexOp>(range.min().getDefiningOp());
-          auto max_idx = cast<mlir::ConstantIndexOp>(range.max().getDefiningOp());
-          auto step_idx = cast<mlir::ConstantIndexOp>(range.step().getDefiningOp());
+          auto min_idx = cast<ConstantIndexOp>(range.getMin().getDefiningOp());
+          auto max_idx = cast<ConstantIndexOp>(range.getMax().getDefiningOp());
+          auto step_idx = cast<ConstantIndexOp>(range.getStep().getDefiningOp());
 
-          auto min = min_idx.getValue();
-          auto max = max_idx.getValue();
-          auto step = step_idx.getValue();
+          auto min = min_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+          auto max = max_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+          auto step = step_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
 
-          if (max == mlir::ShapedType::kDynamicSize)
+          if (max == mlir::ShapedType::kDynamic)
           {
-            dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+            dims_sizes.push_back(mlir::ShapedType::kDynamic);
           }
           else
           {
@@ -2281,11 +2324,11 @@ namespace
         }
         else if (isa<IndexLabelDynamicOp>(lbl.getDefiningOp()))
         {
-          dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+          dims_sizes.push_back(mlir::ShapedType::kDynamic);
         }
         else
         {
-          llvm::errs() << "Neither IndexLabelStaticOp nor IndexLabelDynamicOp\n";
+          llvm::errs() << __FILE__ << ":" << __LINE__ << "ERROR: Neither IndexLabelStaticOp nor IndexLabelDynamicOp\n";
         }
       }
 
@@ -2300,17 +2343,17 @@ namespace
         if (isa<IndexLabelStaticOp>(lbl.getDefiningOp()))
         {
           auto range = cast<IndexLabelStaticOp>(lbl.getDefiningOp());
-          auto min_idx = cast<mlir::ConstantIndexOp>(range.min().getDefiningOp());
-          auto max_idx = cast<mlir::ConstantIndexOp>(range.max().getDefiningOp());
-          auto step_idx = cast<mlir::ConstantIndexOp>(range.step().getDefiningOp());
+          auto min_idx = cast<ConstantIndexOp>(range.getMin().getDefiningOp());
+          auto max_idx = cast<ConstantIndexOp>(range.getMax().getDefiningOp());
+          auto step_idx = cast<ConstantIndexOp>(range.getStep().getDefiningOp());
 
-          auto min = min_idx.getValue();
-          auto max = max_idx.getValue();
-          auto step = step_idx.getValue();
+          auto min = min_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+          auto max = max_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
+          auto step = step_idx.getValue().cast<mlir::IntegerAttr>().getValue().getSExtValue();
 
-          if (max == mlir::ShapedType::kDynamicSize)
+          if (max == mlir::ShapedType::kDynamic)
           {
-            dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+            dims_sizes.push_back(mlir::ShapedType::kDynamic);
           }
           else
           {
@@ -2319,11 +2362,11 @@ namespace
         }
         else if (isa<IndexLabelDynamicOp>(lbl.getDefiningOp()))
         {
-          dims_sizes.push_back(mlir::ShapedType::kDynamicSize);
+          dims_sizes.push_back(mlir::ShapedType::kDynamic);
         }
         else
         {
-          llvm::errs() << "Neither IndexLabelStaticOp nor IndexLabelDynamicOp\n";
+          llvm::errs() << __FILE__ << ":" << __LINE__ << "ERROR: Neither IndexLabelStaticOp nor IndexLabelDynamicOp\n";
         }
       }
 
@@ -2350,15 +2393,15 @@ namespace
         {
           if (isa<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()))
           {
-            // infer the format
-            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             formats.push_back(lhs_format);
             tensors.push_back(dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()));
           }
           else if (isa<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()))
           {
-            // infer the format
-            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             formats.push_back(lhs_format);
             tensors.push_back(dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()));
           }
@@ -2372,21 +2415,21 @@ namespace
       std::vector<mlir::Operation *> lhsLabelOps, rhsLabelOps;
       if (binop == TensorOpKind::Tensor_Red_Add)
       {
-        assert(false);
-        // TODO(gkestor): why do we need this?
-        //  auto SemiringAttr = builder.getStringAttr("eltwise_add"); // this is for standard elementwise addition
-        //  auto op = builder.create<TensorAddOp>(loc(tensor_op.loc()), mlir::UnrankedTensorType::get(builder.getF64Type()),
-        //                                        tensors[1], tensors[0], builder.getStrArrayAttr(formats), );
-        //  builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[1]);
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Unsupported tensor elementwise addition\n";
+        /// TODO(gkestor): look at tensor elementwise addition
+        /// auto SemiringAttr = builder.getStringAttr("eltwise_add"); /// this is for standard elementwise addition
+        /// auto op = builder.create<TensorAddOp>(loc(tensor_op.loc()), mlir::UnrankedTensorType::get(builder.getF64Type()),
+        ///                                       tensors[1], tensors[0], builder.getStrArrayAttr(formats), );
+        /// builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[1]);
       }
 
       else if (binop == TensorOpKind::Tensor_Red_Sub)
       {
-        assert(false);
-        // TODO(gkestor): why do we need this?
-        //  auto op = builder.create<TensorSubtractOp>(loc(tensor_op.loc()), mlir::UnrankedTensorType::get(builder.getF64Type()),
-        //                                              tensors[1], tensors[0], builder.getStrArrayAttr(formats));
-        //  builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[1]);
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Unsupported tensor elementwise substraction\n";
+        /// TODO(gkestor): look at tensor elementwise subtraction
+        /// auto op = builder.create<TensorSubtractOp>(loc(tensor_op.loc()), mlir::UnrankedTensorType::get(builder.getF64Type()),
+        ///                                             tensors[1], tensors[0], builder.getStrArrayAttr(formats));
+        /// builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[1]);
       }
 
       return mlir::success();
@@ -2428,6 +2471,52 @@ namespace
       comet_debug() << " SemiringOp2str " << SemiringOp2str << "\n";
       std::string SemiringOperators = SemiringOp1str + "_" + SemiringOp2str;
       auto SemiringAttr = builder.getStringAttr(SemiringOperators);
+
+      /// masking support: determine type (push/pull/auto/none) and variable (DenseTensorDeclOp or SparseTensorDeclOp)
+      /// NOTE: mask is optional and not required, so we will populate with default values where necessary.
+      MaskExprAST *mask = nullptr;
+      std::string MaskingName;
+      std::string MaskingVar_name;
+      mlir::Value maskVal; /// this may not be found in symbol table.
+                           /// if not found, mask will not be included as an operand.
+
+      if (tensor_op.getMask() != nullptr)
+      {
+
+        mask = llvm::cast<MaskExprAST>(tensor_op.getMask());
+        MaskingName = mask->getMaskType();
+        MaskingVar_name = mask->getTensorName();
+
+        mlir::Value maskLT_op;
+        /// find the variable name in symbol table
+        if ((maskLT_op = symbolTable.lookup(MaskingVar_name)) != NULL)
+        {
+          comet_debug() << "Masking variable found!\n";
+          if (isa<DenseTensorDeclOp>(maskLT_op.getDefiningOp()))
+          {
+            comet_debug() << " is DenseTensorDeclOp\n";
+            maskVal = dyn_cast<DenseTensorDeclOp>(maskLT_op.getDefiningOp());
+          }
+          else if (isa<SparseTensorDeclOp>(maskLT_op.getDefiningOp()))
+          {
+            comet_debug() << " is SparseTensorDeclOp\n";
+            maskVal = dyn_cast<SparseTensorDeclOp>(maskLT_op.getDefiningOp());
+          }
+          else
+          {
+            comet_debug() << " not TensorDeclOp\n";
+          }
+        }
+        comet_debug() << "masking name: " << MaskingName << "\n";
+        comet_debug() << "masking var: " << MaskingVar_name << "\n";
+        comet_vdump(maskVal);
+      }
+      else
+      {
+        comet_debug() << "No mask input provided by user!\n";
+        MaskingName = "none";
+      }
+      auto MaskingAttr = builder.getStringAttr(MaskingName);
 
       auto lhs_lbls = lhsLT->getLabelNames();
       auto rhs1_lbls = rhs1LT->getLabelNames();
@@ -2486,8 +2575,8 @@ namespace
           {
             comet_debug() << " is TensorDeclOp\n";
 
-            // infer the format
-            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<DenseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
 
@@ -2497,8 +2586,8 @@ namespace
           {
             comet_debug() << " is TensorDeclOp\n";
 
-            // infer the format
-            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).format();
+            /// infer the format
+            auto lhs_format = dyn_cast<SparseTensorDeclOp>(lhsLT_op.getDefiningOp()).getFormat();
             comet_debug() << " lhs_format: " << lhs_format << "\n";
             formats.push_back(lhs_format);
 
@@ -2532,11 +2621,12 @@ namespace
                                               tensors[0], tensors[1],
                                               lhs_lbls_value,
                                               affineMapArrayAttr,
-                                              strAttr, SemiringAttr);
+                                              strAttr, SemiringAttr,
+                                              MaskingAttr);
 
         comet_vdump(op);
-        // source is 1st parameter, dest is the second
-        auto setop = builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[2]);
+        /// source is 1st parameter, dest is the second
+        builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[2]);
       }
       else if (binop == '-')
       {
@@ -2546,10 +2636,11 @@ namespace
                                                    tensors[0], tensors[1],
                                                    lhs_lbls_value,
                                                    affineMapArrayAttr,
-                                                   strAttr, SemiringAttr);
+                                                   strAttr, SemiringAttr,
+                                                   MaskingAttr);
         comet_vdump(op);
-        // source is 1st parameter, dest is the second
-        auto setop = builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[2]);
+        /// source is 1st parameter, dest is the second
+        builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[2]);
       }
       else if (binop == '*' || binop == tok_semiring)
       {
@@ -2558,17 +2649,18 @@ namespace
                                                tensors[0], tensors[1],
                                                lhs_lbls_value,
                                                affineMapArrayAttr,
-                                               strAttr, SemiringAttr);
+                                               strAttr, SemiringAttr,
+                                               MaskingAttr, maskVal);
         op.getOperation()->setAttr("__alpha__", builder.getF64FloatAttr(1.0));
         op.getOperation()->setAttr("__beta__", builder.getF64FloatAttr(tens_beta));
 
-        // source is 1st parameter, dest is the second
+        /// source is 1st parameter, dest is the second
         auto setop = builder.create<TensorSetOp>(loc(tensor_op.loc()), op.getOperation()->getResult(0), tensors[2]);
         setop.getOperation()->setAttr("__beta__", builder.getF64FloatAttr(tens_beta));
       }
       else if (binop == tok_elews || binop == tok_monoid)
       {
-        auto op = builder.create<TensorElewsMultOp>(loc(tensor_op.loc()), tensors[2].getType(), tensors[0], tensors[1], lhs_lbls_value, affineMapArrayAttr, strAttr, SemiringAttr);
+        auto op = builder.create<TensorElewsMultOp>(loc(tensor_op.loc()), tensors[2].getType(), tensors[0], tensors[1], lhs_lbls_value, affineMapArrayAttr, strAttr, SemiringAttr, MaskingAttr);
         op.getOperation()->setAttr("__alpha__", builder.getF64FloatAttr(1.0));
         op.getOperation()->setAttr("__beta__", builder.getF64FloatAttr(tens_beta));
 
@@ -2644,9 +2736,9 @@ namespace
       else
       {
         if (isa<SparseTensorDeclOp>(lhs_labeledtensor.getDefiningOp()))
-          assert(false && "random initialization is currently not supported for sparse tensors.\n");
+          llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: random initialization is currently not supported for sparse tensors.\n";
 
-        assert(false && "Not supported format encountered during random initialization of tensor.\n");
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: Not supported format encountered during random initialization of tensor.\n";
       }
 
       std::vector<int64_t> result_dims = getDimSizes(lhs_lbls_value);
@@ -2654,13 +2746,13 @@ namespace
 
       auto type = getType(result_dims);
 
-      // The attribute is a vector with a floating point value per element
-      // (number) in the array
+      /// The attribute is a vector with a floating point value per element
+      /// (number) in the array
       std::vector<double> data;
       int dataArraySize = std::accumulate(result_dims.begin(), result_dims.end(), 1,
                                           std::multiplies<int>());
 
-      // fill data array with random numbers
+      /// fill data array with random numbers
       double upperLimit = 10.0;
       for (int i = 0; i < dataArraySize; i++)
       {
@@ -2668,18 +2760,18 @@ namespace
         data.push_back(randNum);
       }
 
-      // The type of this attribute is tensor of 64-bit floating-point with the
-      // shape of the literal.
+      /// The type of this attribute is tensor of 64-bit floating-point with the
+      /// shape of the literal.
       mlir::Type elementType = builder.getF64Type();
       auto dataType = mlir::RankedTensorType::get(result_dims, elementType);
 
-      // This is the actual attribute that holds the list of values for this
-      // tensor literal.
+      /// This is the actual attribute that holds the list of values for this
+      /// tensor literal.
       auto dataAttribute =
-          mlir::DenseElementsAttr::get(dataType, llvm::makeArrayRef(data));
+          mlir::DenseElementsAttr::get(dataType, llvm::ArrayRef(data));
 
-      // Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
-      // method.
+      /// Build the MLIR op `ta.constant`. This invokes the `DenseConstantOp::build`
+      /// method.
       auto denseConst = builder.create<DenseConstantOp>(loc, type, dataAttribute);
       builder.create<TensorSetOp>(loc, denseConst, lhs_labeledtensor);
 
@@ -2693,8 +2785,8 @@ namespace
       mlir::Value tensorValue = symbolTable.lookup(tensor_name);
       if (tensorValue == nullptr)
       {
-        // the variable was not declared by user.
-        assert(false && "please check your variable definitions!");
+        /// the variable was not declared by user.
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " ERROR: please check your variable definitions!";
       }
       mlir::StringAttr filenameAttr = builder.getStringAttr(filename);
       mlir::IntegerAttr readModeAttr = builder.getI32IntegerAttr(readMode);
@@ -2704,16 +2796,16 @@ namespace
     }
   };
 
-} // namespace
+} /// namespace
 
 namespace tensorAlgebra
 {
 
-  // The public API for codegen.
-  mlir::OwningModuleRef mlirGen(mlir::MLIRContext &context,
-                                ModuleAST &moduleAST)
+  /// The public API for codegen.
+  mlir::OwningOpRef<mlir::ModuleOp> mlirGen(mlir::MLIRContext &context,
+                                            ModuleAST &moduleAST)
   {
     return MLIRGenImpl(context).mlirGen(moduleAST);
   }
 
-} // namespace tensorAlgebra
+} /// namespace tensorAlgebra
