@@ -45,15 +45,10 @@ jobs:
 
     - name: Build blis
       run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install auto
-      
-    - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -G Ninja -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} && make  && make install
 
     - name: Build COMET
       # Build your program with the given configuration
-      run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=$PWD/../llvm/build/lib/cmake/mlir -DLLVM_DIR=$PWD/../llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
+      run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=${{github.workspace}}/llvm/build/lib/cmake/mlir -DLLVM_DIR=${{github.workspace}}/llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
 
     - name: Test
       working-directory: ${{github.workspace}}/build
