@@ -22,7 +22,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - uses: lukka/get-cmake@latest
 
+    
     - name: Cache Submodules
       id: cache-submodule
       uses: actions/cache@v3
