@@ -32,6 +32,7 @@ jobs:
         path: |
           ${{github.workspace}}/llvm
           ${{github.workspace}}/blis/
+          ${{github.workspace}}/install/
         key: ${{ runner.os }}-submodules
 
     - name: Update git submodules
