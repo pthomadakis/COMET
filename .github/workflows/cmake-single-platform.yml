@@ -46,7 +46,7 @@ jobs:
       run: mkdir ${{github.workspace}}/llvm/build && cd llvm/build/ && cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS="mlir;openmp;clang" -DLLVM_TARGETS_TO_BUILD="X86" -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja
 
     - name: Build blis
-      # if: steps.cache-submodule.outputs.cache-hit != 'true'
+      if: steps.cache-submodule.outputs.cache-hit != 'true'
       run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install auto && make && make install
 
     - name: Build COMET
