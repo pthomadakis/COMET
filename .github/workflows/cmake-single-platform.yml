@@ -53,9 +53,9 @@ jobs:
       # Build your program with the given configuration
       run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=${{github.workspace}}/llvm/build/lib/cmake/mlir -DLLVM_DIR=${{github.workspace}}/llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
 
-    # - name: Test
-    #   working-directory: ${{github.workspace}}/build
+    - name: Test
+      working-directory: ${{github.workspace}}/build
     #   # Execute tests defined by the CMake configuration.
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      # run: ninja check-comet-integration
+      run: ninja check-comet-integration
   
