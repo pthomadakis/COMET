@@ -53,6 +53,17 @@ jobs:
       # Build your program with the given configuration
       run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=${{github.workspace}}/llvm/build/lib/cmake/mlir -DLLVM_DIR=${{github.workspace}}/llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
 
+    - name: Initialize Python 3.11
+      uses: actions/setup-python@v1
+      
+      with:
+          python-version: 3.11
+      
+    - name: Install python dependencies
+      run: |
+          python -m pip install --upgrade pip
+          pip install psutil     
+          
     - name: Test
       working-directory: ${{github.workspace}}/build
     #   # Execute tests defined by the CMake configuration.
