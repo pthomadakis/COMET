@@ -67,7 +67,8 @@ tool_dirs = [
     config.comet_tools_dir, config.mlir_tools_dir, config.llvm_tools_dir
 ]
 tools = [
-    'comet-opt'
+    'comet-opt',
+    'mlir-cpu-runner'
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
