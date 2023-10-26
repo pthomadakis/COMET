@@ -63,10 +63,9 @@ jobs:
       run: |
           sudo apt-get install -y python3-psutil
           
-    - name: Check Python
+    - name: Set PATH
       run: | 
-          python --version
-          python -c "import sys; print('\n'.join(sys.path))"
+          echo ${{github.workspace}}/llvm/build/bin/ >> $GITHUB_PATH
       
     - name: Test
       working-directory: ${{github.workspace}}/build
