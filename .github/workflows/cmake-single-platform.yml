@@ -70,6 +70,8 @@ jobs:
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
        
       run: |
+          ls ${{github.workspace}}/llvm/build/bin/
+          ls ${{github.workspace}}/build/bin/
           echo "${{github.workspace}}/llvm/build/bin/" >> $GITHUB_PATH
           echo $GITHUB_PATH
           ninja check-comet-integration
