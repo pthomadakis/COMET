@@ -64,6 +64,8 @@ jobs:
           sudo apt-get install -y python3-psutil
       
     - name: Test
+      env: 
+        LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
       working-directory: ${{github.workspace}}/build
       shell: bash
     #   # Execute tests defined by the CMake configuration.
