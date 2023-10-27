@@ -24,7 +24,6 @@ set(LIBS
   COMETTensorAlgebraDialect
   COMETIndexTreeDialect
   COMETIndexTreeToSCF
-  BLAS
 )
 
 target_link_libraries(comet-opt 
