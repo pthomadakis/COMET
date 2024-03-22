@@ -64,7 +64,7 @@ using llvm::StringRef;
 #define DEBUG_TYPE "partial-fusion"
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -313,9 +313,20 @@ mlir::Value IndexTreeKernelFusionPass::createNewTensorDecl(
 
   /// Get operands
   std::vector<mlir::Value> operands;
-  operands.insert(operands.begin(),
-                  old_tensor_op->getOperands().begin() + rank_base,
-                  old_tensor_op->getOperands().end());
+
+  TensorType old_tensor = old_dense_tensor_decl.getType().cast<TensorType>();
+
+  for (int64_t i = rank_base; i < old_tensor.getRank(); i++)
+  {
+    if (old_tensor.isDynamicDim(i))
+    {
+      operands.push_back(old_tensor_op->getOperands()[i]);
+    }
+    else
+    {
+      operands.push_back(builder.create<arith::ConstantIndexOp>(loc, old_tensor.getDimSize(i)));
+    }
+  }
 
   /// Get format
   std::string format;
@@ -355,21 +366,9 @@ void IndexTreeKernelFusionPass::createNewTensor(
     /// Get the previous memref.load operand
     auto loc = old_tensor_alloc.getLoc();
     OpBuilder builder(old_tensor_alloc.getDefiningOp());
-    mlir::Value load_op = old_tensor_alloc.getDefiningOp()->getOperand(rank_base);
 
-    /// Get constant zero and constant one
-    ConstantOp constant_zero = builder.create<ConstantOp>(loc,
-                                                          builder.getIndexType(),
-                                                          builder.getIndexAttr(0));
-    ConstantOp constant_one = builder.create<ConstantOp>(loc,
-                                                         builder.getIndexType(),
-                                                         builder.getIndexAttr(1));
-
-    /// Create ta.index_label_static
-    mlir::Value index_label_op = builder.create<tensorAlgebra::IndexLabelStaticOp>(loc,
-                                                                                   constant_zero,
-                                                                                   load_op,
-                                                                                   constant_one);
+    /// Create ta.index_label
+    mlir::Value index_label_op = builder.create<tensorAlgebra::IndexLabelOp>(loc);
 
     comet_debug() << "index_label_op\n";
     comet_vdump(index_label_op);
@@ -894,6 +893,7 @@ void IndexTreeKernelFusionPass::doKernelFusion(
       {
         if (llvm::isa<indexTree::IndexTreeIndicesOp>(operand.getDefiningOp()))
         {
+          comet_pdump(operand.getDefiningOp());
           operands.push_back(operand.getDefiningOp());
         }
       }
@@ -901,11 +901,12 @@ void IndexTreeKernelFusionPass::doKernelFusion(
 
     buffer.push_back(std::move(operands));
   }
-
+  comet_debug() << "Buffer size " << buffer.size() << "\n";
   while (!buffer.empty())
   {
     std::vector<mlir::Operation *> operands = buffer.front();
     buffer.pop_front();
+    comet_debug() << "Buffer size " << buffer.size() << "\n";
     if (operands.size() < 2)
     {
       /// Too few nodes to fuse
@@ -916,14 +917,18 @@ void IndexTreeKernelFusionPass::doKernelFusion(
     std::vector<bool> is_clustered(operands.size(), false);
     for (int host_i = operands.size() - 1; host_i >= 0; --host_i)
     {
-      /// Get the host
-      /// Note: The host is the latest one, otherwise the fused nodes are not in correct usage order and got Error:
-
-      mlir::Operation *host = operands[host_i];
       if (is_clustered[host_i])
       {
         continue;
       }
+
+      /// Get the host
+      /// Note: The host is the latest one, otherwise the fused nodes are not in correct usage order and got Error:
+      mlir::Operation *host = operands[host_i];
+      comet_debug() << host << "host\n";
+      comet_debug() << "host\n";
+      comet_pdump(host);
+
       is_clustered[host_i] = true;
       int host_index = getIndicesOpsIndex(host);
 
@@ -937,6 +942,8 @@ void IndexTreeKernelFusionPass::doKernelFusion(
         }
         mlir::Operation *node = operands[node_i];
         int node_index = getIndicesOpsIndex(node);
+        comet_debug() << "node\n";
+        comet_pdump(node);
         /// Check if node_i can be fused with host_i
         if (node_index == host_index)
         {
@@ -969,10 +976,13 @@ void IndexTreeKernelFusionPass::doKernelFusion(
       for (int node_i = cluster.size() - 2; node_i >= 0; --node_i)
       {
         mlir::Operation *node = cluster[node_i];
+        comet_debug() << "Erasing \n";
         for (auto u : node->getUsers())
         {
+          comet_pdump(u);
           u->erase();
         }
+        comet_pdump(node);
         node->erase();
       }
     }

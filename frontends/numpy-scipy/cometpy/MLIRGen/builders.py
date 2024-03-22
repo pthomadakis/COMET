@@ -5,8 +5,8 @@ import itertools
 from typing import Dict, List, Tuple, Sequence, Union
 from collections import OrderedDict
 from ast import operator
-from MLIRGen import types_mlir
-from MLIRGen.types import *
+from cometpy.MLIRGen import types_mlir
+from cometpy.MLIRGen.types import *
 
 
 class Dialect:
@@ -191,20 +191,14 @@ class TensorSumBuilder:
         undefined=jinja2.StrictUndefined,
     )
 
-    def __init__(self, lhs, operators, tensors_shapes, label_map):
-        self.lhs = lhs
-        self.tensors_shapes = tensors_shapes
-        output_type = "tensor<{}xf64>".format("x".join(str(label_map[v][0]) for v in self.tensors_shapes[-1]))
-        input_type = []
-        self.input_type = "tensor<{}xf64>".format("x".join(str(label_map[v][0]) if label_map[v][1] == DENSE else '?' for v in self.tensors_shapes[0]))
+    def __init__(self, data): # lhs, operators, tensors_shapes, label_map):
+        self.lhs = data["out_id"]
+        self.input_type = "tensor<{}xf64>".format("x".join(str(v) for v in data["shapes"][0]))
 
-        self.operators = self.operators = "({})".format(",".join("%t"+str(v) for v in operators))
+        self.operators = "({})".format(",".join("%t"+str(v) for v in data["operands"]))
 
     def build_op(self):
         output_type = "f64"
-        # for t in self.tensors_shapes[:-1]:
-        #     input_type.append("tensor<{}xf64>".format("x".join(str(v) for v in t)))
-        # input_type = ",".join(input_type) 
         
         return self.tensor_sum_wrapper_text.render(
             lhs = self.lhs,
@@ -219,17 +213,15 @@ class SetOp_Builder:
 
     set_op_wrapper_text = jinja2.Template(
         ("" * indentation_size)
-        + '"ta.set_op"(%temp_{{input}},%t{{dest}}) {__beta__ = {{beta}} : f64} : ({{outputtype}}, {{outputtype}}) -> ()\n',
+        + '"ta.set_op"(%t{{input}},%t{{dest}}) {__beta__ = {{beta}} : f64} : ({{outputtype}}, {{outputtype}}) -> ()\n',
         undefined=jinja2.StrictUndefined,
     )
 
-    def __init__(self, in_tensor, target, tensors_shapes, label_map, beta) :
-        self.target = target
-        self.in_tensor = in_tensor
-        self.tensors_shapes =[]
-        for l in tensors_shapes:
-            self.tensors_shapes.append([ label_map[lbl][0] if label_map[lbl][1] == DENSE else '?' for lbl in l ]  )
-        self.beta = "{:e}".format(beta)
+    def __init__(self, data):# in_tensor, target, tensors_shapes, label_map, beta) :
+        self.target = data["lhs"]
+        self.in_tensor = data["rhs"]
+        self.tensors_shapes = data["shapes"]
+        self.beta = "{:e}".format(data["beta"])
 
 
     def build_op(self):
@@ -255,7 +247,7 @@ class ArithOp_Builder:
 
     tc_decl_wrapper_text = jinja2.Template(   
         ("" * indentation_size)
-        + '%temp_{{dest}} = "ta.mul"({{operators}})'
+        + '%t{{dest}} = "ta.mul"({{operators}})'
         + '{MaskType = "{{mask_type}}", ' 
         + '__alpha__ = 1.000000e+00 : f64, '  
         +"__beta__ = {{beta}} : f64,"
@@ -266,7 +258,7 @@ class ArithOp_Builder:
         +"({{inputtype}})"
         +"-> {{outputtype}}"
         + "\n" ,
-        # + '"ta.set_op"(%temp_{{dest}},%t{{dest}}) {__beta__ = {{beta}} : f64} : ({{outputtype}}, {{outputtype}}) -> ()\n',
+        # + '"ta.set_op"(%t{{dest}},%t{{dest}}) {__beta__ = {{beta}} : f64} : ({{outputtype}}, {{outputtype}}) -> ()\n',
         undefined=jinja2.StrictUndefined,
     )
 
@@ -274,7 +266,7 @@ class ArithOp_Builder:
 
     tensor_add_wrapper_text = jinja2.Template(   
         ("" * indentation_size)
-        +'%temp_{{dest}} = "ta.add"({{operators}})'
+        +'%t{{dest}} = "ta.add"({{operators}})'
         +' {'
         +' Masktype = "none",'
         +' formats = [{{formats}}],'
@@ -284,13 +276,13 @@ class ArithOp_Builder:
         +' : ({{inputtype}})'
         +"-> {{outputtype}}"
         + "\n", 
-        # + '"ta.set_op"(%temp_{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
+        # + '"ta.set_op"(%t{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
         undefined=jinja2.StrictUndefined,
     )
 
     tensor_sub_wrapper_text = jinja2.Template(   
         ("" * indentation_size)
-        +'%temp_{{dest}} = "ta.subtract"({{operators}})'
+        +'%t{{dest}} = "ta.subtract"({{operators}})'
         +' {'
         +' Masktype = "none",'
         +' formats = [{{formats}}],'
@@ -300,13 +292,13 @@ class ArithOp_Builder:
         +' : ({{inputtype}})'
         +"-> {{outputtype}}"
         + "\n",
-        # + '"ta.set_op"(%temp_{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
+        # + '"ta.set_op"(%t{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
         undefined=jinja2.StrictUndefined,
     )
 
     elewisemult_wrapper_text = jinja2.Template(   
         ("" * indentation_size)
-        +'%temp_{{dest}} = "ta.elews_mul"({{operators}})'
+        +'%t{{dest}} = "ta.elews_mul"({{operators}})'
         +' {__alpha__ = 1.000000e+00 : f64, '
         +"__beta__ = {{beta}}: f64,"
         + 'formats = [{{formats}}],'
@@ -314,13 +306,13 @@ class ArithOp_Builder:
         +"({{inputtype}})"
         +"-> {{outputtype}}"
         + "\n" ,
-        # + '"ta.set_op"(%temp_{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
+        # + '"ta.set_op"(%t{{dest}},%t{{dest}}): ({{outputtype}}, {{outputtype}}) -> ()\n',
         undefined=jinja2.StrictUndefined,
     )
 
     tranpose_wrapper_text = jinja2.Template(   
         ("" * indentation_size)
-        + '%temp_{{dest}} = "ta.transpose"({{operators}})'
+        + '%t{{dest}} = "ta.transpose"({{operators}})'
         + '{__alpha__ = 1.000000e+00 : f64, '
         +"__beta__ = 0.000000e+00 : f64,"
         + 'formats = [{{formats}}],'
@@ -332,87 +324,83 @@ class ArithOp_Builder:
         undefined=jinja2.StrictUndefined,
     )
 
-    def __init__(self, dest, input_tensors:list, tc_indices, formats: list, tensors_shapes, opr_type, label_map, mask=None, mask_type="none", mask_lbls = None, semiring=None, beta=0):
-                #   dimslbls_to_map:list, input_array_dims_lbls:list, 
-                #             target_dims_lbls:list,tensor_types:list,tc_indices:list,opr_type:str,op:str, formats:list) -> None:
+    def __init__(self, data): 
         
-        self.dest = dest
-        self.operators = "{}".format(",".join("%t"+str(v) for v in input_tensors)+","+",".join("%i"+str(v) for v in tensors_shapes[-1]))
-        self.tc_indices = tc_indices
-        # self.dimslbls_to_map = dimslbls_to_map
-        # self.input_array_dims_lbls = input_array_dims_lbls
-        # self.target_dims_lbls = target_dims_lbls
-        self.tensors_shapes =[]
-        for l in tensors_shapes:
-            self.tensors_shapes.append([ label_map[lbl][0] if label_map[lbl][1] == DENSE else '?' for lbl in l ]  )
-        # self.tensors_shapes = [label_map[lbl][0] for lbl in tensors_shapes]
-        self.opr_type = opr_type
-        # self.op = op
-        self.formats = formats
-        self.mask = mask
-        self.mask_type = mask_type
-        if mask_lbls != None:
-            self.mask_shape = [ label_map[lbl][0] if label_map[lbl][1] == DENSE else '?' for lbl in mask_lbls ]
-            self.operators+=",%t"+str(self.mask)
-        else:
-            self.mask_shape = None
-        self.semiring = semiring
-        self.beta = "{:e}".format(beta)
+        self.mask = None
+        self.mask_type = "None"
+        self.mask_shape = None
+        self.semiring = None
 
+
+        self.dest = data["out_id"]
+        self.operators = "{}".format(",".join("%t"+str(v) for v in data["operands"])+","+",".join("%i"+str(vv) for v in data["op_ilabels"] for vv in v))
+        self.tensors_shapes =[]
+        self.op_ilabels = data["op_ilabels"]
+        for l in data["shapes"]:
+            self.tensors_shapes.append([ str(lbl) for lbl in l ]  )
+        # self.tensors_shapes = [label_map[lbl][0] for lbl in tensors_shapes]
+        self.opr_type = data["op_type"]
+        # self.op = op
+        self.formats = data["formats"]
+        if "mask" in data:
+            self.mask = data["mask"][0]
+            self.mask_type = data["mask"][1]
+            if data["mask"][2] != None:
+                self.mask_shape = [ str(lbl) for lbl in data["mask"][2] ]
+                self.operators+=",%t"+str(self.mask)
+        if "semiring" in data:
+            self.semiring = data["semiring"]
+        self.beta = "{:e}".format(data["beta"])
 
     def build_op(self):
-        output_type = "tensor<{}xf64>".format("x".join(str(v) for v in self.tensors_shapes[-1]))
         input_type = []
         for t in self.tensors_shapes[:-1]:
             input_type.append("tensor<{}xf64>".format("x".join(str(v) for v in t)))
-        for v in self.tensors_shapes[-1]:
-            input_type.append("!ta.range")
+        for t in self.tensors_shapes:
+            for v in t:
+                input_type.append("!ta.indexlabel")
         input_type = ",".join(input_type) 
         if self.mask_shape != None:
             input_type += ",tensor<{}xf64>".format("x".join(str(v) for v in self.mask_shape))
         # beta_val = ArithOp_Builder.get_beta_val(self.op)
         
-        ops = self.tc_indices.split(',')
         iMap = {}
-        i = 0
-        if len(ops) > 1:
-            op1 = ops[0]
-            op2, res = ops[1].split('->')
-        else:
-            op2 = []
-            op1,res = ops[0].split('->')
+        vMap = {}
         indexing_map = []
+        i = 0
         temp = []
-        for l in op1:
-            # if l not in iMap:
+        for k, l in enumerate(self.op_ilabels[0]):
             iMap[l] = i
+            vMap[l] = self.tensors_shapes[0][k]
             temp.append(i)
             i+=1
+        
         indexing_map.append(temp)
-
-        if len(ops) > 1:
+        if len(self.op_ilabels) > 2:
             temp = []
-            for l in op2:
+            for k, l in enumerate(self.op_ilabels[1]):
                 if l not in iMap:
                     iMap[l] = i
+                    vMap[l] = self.tensors_shapes[1][k]
                     temp.append(i)
                     i+=1
                 else:
                     temp.append(iMap[l])
-
             indexing_map.append(temp)
         temp = []
-        for l in res:
+
+        for l in self.op_ilabels[-1]:
             temp.append(iMap[l])
         indexing_map.append(temp)
         indexing_maps = []
+
+        output_type = "tensor<{}xf64>".format("x".join(str(vMap[v]) for v in self.op_ilabels[-1]))
 
         for imap in indexing_map:
             indexing_maps.append("affine_map<({})->({})>".format(",".join(["d"+str(l) for l in range(i)]) , ",".join(["d"+str(l) for l in imap])))
         
         indexing_maps = str(indexing_maps).replace("'","")
 
-        
         # Tensor contraction
         if self.opr_type == 'c': 
             semiring = "plusxy_times"
@@ -444,7 +432,7 @@ class ArithOp_Builder:
                     outputtype = output_type,
                     # beta =  self.beta_val,
                     formats = '"{}", "{}", "{}"'.format(*[self.formats_str[x] for x in self.formats]),
-                    lhs_dims = len(self.tensors_shapes[-1]),
+                    lhs_dims = sum([len(t) for t in self.tensors_shapes ]),
                     semiring = semiring,
                     mask=self.mask,
                     mask_type = self.mask_type,
@@ -541,24 +529,19 @@ class Tensor_Decl_Builder:
         undefined=jinja2.StrictUndefined,
     )
 
-    def __init__(self, lhs, decl_vars:list, input_shape: str, format, dtype, label_map, is_input)->None:
-        self.lhs = lhs
-        self.inputtype = "tensor<{}x{}>".format("x".join(str(label_map[v][0]) if label_map[v][1] == DENSE else '?' for v in input_shape), dtype)
-        self.decl_vars = decl_vars
-        self.format = format
-        self.is_input = is_input
+    def __init__(self, data)->None:
+        self.lhs = data["id"]
+        self.inputtype = "tensor<{}x{}>".format("x".join(str(v) for v in data["shape"]), data["value_type"])
+        # self.decl_vars = data["dimsSSA"]
+        self.decl_vars = []
+        self.format = data["format"]
+        self.is_input = data["is_input"]
 
 
     def build_tensor(self):
-        dims_tuple = "({})".format(",".join("%i"+str(v) for v in self.decl_vars))
-        ranges_tuple = "({})".format(",".join(["!ta.range"]* len(self.decl_vars)))
-        # ranges_tuple = "("
-        # for i in range(len(self.decl_vars)-1):
-        #     dims_tuple += self.decl_vars[i] + ","
-        #     ranges_tuple += "!ta.range,"
-        
-        # dims_tuple += self.decl_vars[-1] +  ")"
-        # ranges_tuple += "!ta.range)"
+        dims_tuple = "({})".format(",".join("%d"+str(v) for v in self.decl_vars))
+        ranges_tuple = "({})".format(",".join(["index"]* len(self.decl_vars)))
+
         if not self.format == DENSE:
             where = "_from_file"
             format = '"{}" , temporal_tensor = false'.format(self.formats[self.format])
@@ -598,13 +581,14 @@ class PrintBuilder:
         undefined=jinja2.StrictUndefined,
     )
 
-    def __init__(self, operand, input_labels, dtype, label_map):
-        self.operand = operand[0]
-        self.outtype = "x".join(str(label_map[v][0]) if label_map[v][1] == DENSE else '?' for v in input_labels[0])
-        if len(self.outtype) > 0:
-            self.outtype = "tensor<{}x{}>".format(self.outtype, dtype)
+    def __init__(self, data): #operand, input_labels, dtype, label_map):
+        self.operand = data["operands"][0]
+        self.outtype = "x".join(str(v) for v in data["shapes"][0])
+        if len(data["shapes"][0])==1 and data["shapes"][0][0] == 1:
+            self.outtype = data["value_type"]
         else:
-            self.outtype = dtype
+            self.outtype = "tensor<{}x{}>".format(self.outtype, data["value_type"])
+
     def build_op(self):
         return self.tensor_print_text.render(
             tensor = self.operand,

@@ -39,7 +39,7 @@ using namespace mlir::indexTree;
 using namespace mlir::tensorAlgebra;
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -148,22 +148,28 @@ void doTensorMultOp(TensorMultOp op, unique_ptr<Index_Tree> &tree)
   comet_debug() << "mask-tensor\n";
   comet_vdump(mask_tensor);
 
+  std::vector<mlir::Value> rhs1_labels = op.getRhs1IndexLabels();
+  std::vector<mlir::Value> rhs2_labels = op.getRhs2IndexLabels();
+  std::vector<mlir::Value> lhs_labels = op.getResultIndexLabels();
+
   auto allPerms = getAllPerms(op.getIndexingMaps());
+  assert(allPerms.size() == 3);
+
   auto allFormats = getAllFormats(op.getFormatsAttr(), allPerms);
   auto SemiringOp = op.getSemiringAttr();
   auto MaskingTypeAttr = op.getMaskTypeAttr();
 
-  assert(allPerms.size() == 3);
+  auto B = tree->getOrCreateTensor(rhs1_tensor, rhs1_labels, allFormats[0]);
+  auto C = tree->getOrCreateTensor(rhs2_tensor, rhs2_labels, allFormats[1]);
+  auto A = tree->getOrCreateTensor(lhs_tensor, lhs_labels, allFormats[2]);
 
-  auto B = tree->getOrCreateTensor(rhs1_tensor, allFormats[0]);
-  auto C = tree->getOrCreateTensor(rhs2_tensor, allFormats[1]);
-  auto A = tree->getOrCreateTensor(lhs_tensor, allFormats[2]);
   Tensor *M;
   std::unique_ptr<UnitExpression> e;
+  std::vector<mlir::Value> empty;
   if (mask_tensor != nullptr) /// mask is an optional input
   {
     comet_debug() << "mask input provided by user\n";
-    M = tree->getOrCreateTensor(mask_tensor, allFormats[2]); /// format same as lhs_tensor
+    M = tree->getOrCreateTensor(mask_tensor, empty, allFormats[2]); /// We don't need indexlabel info for the mask
     e = make_unique<UnitExpression>(A, B, C, M, "*");
   }
   else
@@ -181,8 +187,9 @@ void doTensorMultOp(TensorMultOp op, unique_ptr<Index_Tree> &tree)
   auto inputDomains = e->computeInputIterDomains();
   auto outputDomains = e->computeOutputIterDomains();
 
-  IndicesType rhs1_indices = tree->getIndices(rhs1_tensor);
-  IndicesType rhs2_indices = tree->getIndices(rhs2_tensor);
+  IndicesType rhs1_indices = tree->getIndices(rhs1_labels);
+  IndicesType rhs2_indices = tree->getIndices(rhs2_labels);
+
   IndicesType allIndices = getUnion(rhs1_indices, rhs2_indices);
 
   auto lhsIndices = A->getIndices();
@@ -201,6 +208,7 @@ void doTensorMultOp(TensorMultOp op, unique_ptr<Index_Tree> &tree)
       auto &odomain = outputDomains.at(index);
       node->setOutputDomain(odomain);
     }
+    comet_debug() << "index " << index << "\n";
 
     parent = node;
   }
@@ -211,6 +219,10 @@ void doTensorMultOp(TensorMultOp op, unique_ptr<Index_Tree> &tree)
 template <typename T>
 void doElementWiseOp(T op, unique_ptr<Index_Tree> &tree)
 {
+  std::vector<mlir::Value> rhs1_labels = op.getRhs1IndexLabels();
+  std::vector<mlir::Value> rhs2_labels = op.getRhs2IndexLabels();
+  std::vector<mlir::Value> lhs_labels = op.getResultIndexLabels();
+
   Value rhs1_tensor = getRealRhs(op.getRhs1().getDefiningOp());
   Value rhs2_tensor = getRealRhs(op.getRhs2().getDefiningOp());
   Value lhs_tensor = getRealLhs(op);
@@ -230,9 +242,9 @@ void doElementWiseOp(T op, unique_ptr<Index_Tree> &tree)
 
   assert(allPerms.size() == 3);
 
-  auto B = tree->getOrCreateTensor(rhs1_tensor, allFormats[0]);
-  auto C = tree->getOrCreateTensor(rhs2_tensor, allFormats[1]);
-  auto A = tree->getOrCreateTensor(lhs_tensor, allFormats[2]);
+  auto B = tree->getOrCreateTensor(rhs1_tensor, rhs1_labels, allFormats[0]);
+  auto C = tree->getOrCreateTensor(rhs2_tensor, rhs2_labels, allFormats[1]);
+  auto A = tree->getOrCreateTensor(lhs_tensor, lhs_labels, allFormats[2]);
 
   auto e = make_unique<UnitExpression>(A, B, C, "*");
 
@@ -245,7 +257,7 @@ void doElementWiseOp(T op, unique_ptr<Index_Tree> &tree)
   auto outputDomains = e->computeOutputIterDomains();
 
   /// RHS and LHS indices must be the same for elementwise multiplication
-  IndicesType allIndices = tree->getIndices(rhs1_tensor);
+  IndicesType allIndices = tree->getIndices(rhs1_labels);
 
   auto lhsIndices = A->getIndices();
   TreeNode *parent = tree->getRoot();
@@ -293,8 +305,8 @@ IndexTreeComputeOp createComputeNodeOp(OpBuilder &builder, TreeNode *node, Locat
   auto context = builder.getContext();
   IntegerType i64Type = IntegerType::get(context, 64);
   auto expr = node->getExpression();
-
   SmallVector<Attribute, 8> allIndices_rhs;
+
   for (auto t : expr->getOperands())
   {
     SmallVector<int64_t, 8> indices;
@@ -304,12 +316,14 @@ IndexTreeComputeOp createComputeNodeOp(OpBuilder &builder, TreeNode *node, Locat
     }
     allIndices_rhs.push_back(builder.getI64ArrayAttr(indices));
   }
+
   SmallVector<Attribute, 8> allIndices_lhs;
   for (auto t : expr->getResults())
   {
     SmallVector<int64_t, 8> indices;
     for (auto index : t->getIndices())
     {
+      comet_debug() << index << " \n";
       indices.push_back(index);
     }
     allIndices_lhs.push_back(builder.getI64ArrayAttr(indices));
@@ -325,6 +339,7 @@ IndexTreeComputeOp createComputeNodeOp(OpBuilder &builder, TreeNode *node, Locat
     }
     allFormats_rhs.push_back(builder.getStrArrayAttr(formats));
   }
+
   SmallVector<Attribute, 8> allFormats_lhs;
   for (auto t : expr->getResults())
   {
@@ -359,6 +374,8 @@ IndexTreeComputeOp createComputeNodeOp(OpBuilder &builder, TreeNode *node, Locat
                                                                       mlir::UnrankedTensorType::get(builder.getF64Type()), t_lhs,
                                                                       builder.getArrayAttr(allIndices_lhs),
                                                                       builder.getArrayAttr(allFormats_lhs));
+  comet_vdump(leafop_lhs);
+
   bool comp_worksp_opt = false; /// non-compressed workspace, this is a place-holder and it is updated in workspace transform pass.
   llvm::StringRef semiring = expr->getSemiring();
   llvm::StringRef maskType = expr->getMaskType();

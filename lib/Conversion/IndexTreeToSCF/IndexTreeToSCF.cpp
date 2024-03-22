@@ -35,6 +35,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Dominance.h"
@@ -65,7 +66,7 @@ using llvm::StringRef;
 #define DEBUG_TYPE "lowering-it-to-scf"
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -75,7 +76,6 @@ namespace comet
 #define GEN_PASS_DEF_CONVERTINDEXTREETOSCF
 #include "comet/Conversion/Passes.h.inc"
 } /// namespace comet
-
 
 namespace
 {
@@ -456,35 +456,35 @@ namespace
     return ret;
   }
 
-  Value findCorrespondingAlloc(Value &iOp)
-  {
-    comet_debug() << "findCorrespondingAlloc for loop upper bound\n";
-    comet_vdump(iOp);
-    auto init_alloc = iOp.getDefiningOp()->getOperand(0);
-    comet_vdump(init_alloc);
+  // Value findCorrespondingAlloc(Value &iOp)
+  // {
+  //   comet_debug() << "findCorrespondingAlloc for loop upper bound\n";
+  //   comet_vdump(iOp);
+  //   auto init_alloc = iOp.getDefiningOp()->getOperand(0);
+  //   comet_vdump(init_alloc);
 
-    while (true)
-    {
-      if (isa<memref::AllocOp>(init_alloc.getDefiningOp()))
-      {
-        if (init_alloc.getType().dyn_cast<MemRefType>().getDimSize(0) != ShapedType::kDynamic)
-        {
-          return init_alloc;
-        }
-      }
-      if (init_alloc.getDefiningOp()->getNumOperands() > 0)
-      {
-        init_alloc = init_alloc.getDefiningOp()->getOperand(0);
-      }
-      else
-      {
-        /// Alloc related to another sparse tensor construct such as coming from sparse transpose
-        comet_debug() << "Return alloc op - comes from sptensor_construct\n";
-        comet_vdump(init_alloc);
-        return init_alloc;
-      }
-    }
-  }
+  //   while (true)
+  //   {
+  //     if (isa<memref::AllocOp>(init_alloc.getDefiningOp()))
+  //     {
+  //       if (init_alloc.getType().dyn_cast<MemRefType>().getDimSize(0) != ShapedType::kDynamic)
+  //       {
+  //         return init_alloc;
+  //       }
+  //     }
+  //     if (init_alloc.getDefiningOp()->getNumOperands() > 0)
+  //     {
+  //       init_alloc = init_alloc.getDefiningOp()->getOperand(0);
+  //     }
+  //     else
+  //     {
+  //       /// Alloc related to another sparse tensor construct such as coming from sparse transpose
+  //       comet_debug() << "Return alloc op - comes from sptensor_construct\n";
+  //       comet_vdump(init_alloc);
+  //       return init_alloc;
+  //     }
+  //   }
+  // }
 
   /// Get allocs for a tensor (sparse or dense)
   std::vector<Value> getAllocs(Value &tensor)
@@ -580,7 +580,7 @@ namespace
       comet_debug() << " order: " << order << "\n";
       if (order == ancestorsOps[0]->getChildren().size())
       {
-       llvm::errs() << __FILE__ << ":" << __LINE__ << "ERROR: Not belong to parent's children\n";
+        llvm::errs() << __FILE__ << ":" << __LINE__ << "ERROR: Not belong to parent's children\n";
       }
       else
       {
@@ -636,45 +636,18 @@ namespace
     /// Check which tensor is sparse, which is dense;
     /// Since this function only handles mixed sparse/dense, then "D" only occurs in one tensor
     /// Both the dense and sparse tensor contain the dim size; But they are different. Use one.
-    int64_t maxSize = 0;
     comet_debug() << " ";
     comet_vdump(tensor);
+
+    Value lowerBound = builder.create<ConstantIndexOp>(loc, 0);
+    auto step = builder.create<ConstantIndexOp>(loc, 1);
+
     if (tensor.getType().isa<mlir::RankedTensorType>())
     { /// Dense tensor
       Value upperBound;
-      auto tensorTy = tensor.getType().cast<mlir::TensorType>();
-      maxSize = tensorTy.getDimSize(id);
+      auto dim = builder.create<tensor::DimOp>(loc, tensor, id);
+      upperBound = dim;
 
-      /// Check if dynamic size
-      /// Check upperBoundsize
-      if (maxSize == ShapedType::kDynamic)
-      {
-        /// Find defOp allocOp, check the parameter
-        comet_debug() << " Dynamic size ";
-        comet_pdump(tensor.getDefiningOp());                /// tensor_load
-        comet_vdump(tensor.getDefiningOp()->getOperand(0)); /// alloc <?x32xf64>
-        /// Check the order of the current dynamic size
-        auto rhs1_alloc = tensor.getDefiningOp()->getOperand(0);
-        std::vector<unsigned int> dyn_dims_vec;
-        for (unsigned i = 0; i < tensorTy.getRank(); i++)
-        {
-          if (tensorTy.isDynamicDim(i))
-          {
-            dyn_dims_vec.push_back(i);
-          }
-        } /// ? x ? x 20 x ?
-        auto rhs1_loc_dyn = findIndexInVector<unsigned int>(dyn_dims_vec, id);
-        comet_vdump(rhs1_alloc.getDefiningOp()->getOperand(rhs1_loc_dyn));
-
-        upperBound = rhs1_alloc.getDefiningOp()->getOperand(rhs1_loc_dyn);
-      }
-      else
-      {
-        upperBound = builder.create<ConstantIndexOp>(loc, maxSize);
-      }
-
-      Value lowerBound = builder.create<ConstantIndexOp>(loc, 0);
-      auto step = builder.create<ConstantIndexOp>(loc, 1);
       auto loop = builder.create<scf::ForOp>(loc, lowerBound, upperBound, step);
 
       comet_debug() << " D Loop\n";
@@ -699,12 +672,10 @@ namespace
     {
       comet_debug() << "cur_idx is in tensor " << i << "\n";
 
-      Value lowerBound = builder.create<ConstantIndexOp>(loc, 0);
       auto index_0 = builder.create<ConstantIndexOp>(loc, 0);
       std::vector<Value> upper_indices = {index_0};
       Value upperBound = builder.create<memref::LoadOp>(loc, allAllocs[i][4 * id], upper_indices);
       comet_vdump(allAllocs[i][4 * id]);
-      auto step = builder.create<ConstantIndexOp>(loc, 1);
       auto loop = builder.create<scf::ForOp>(loc, lowerBound, upperBound, step);
 
       comet_debug() << " D Loop\n";
@@ -758,27 +729,28 @@ namespace
           comet_debug() << " opstree->parent is not NULL\n";
           comet_debug() << " parent forop\n";
           comet_vdump(parent_forop);
-          auto parent_UpperBound = parent_forop.getUpperBound();
-          comet_debug() << " parent upperBound:\n";
-          comet_vdump(parent_UpperBound);
 
+          /// TODO (PT) Not sure why this (now commented out) code was needed but it breaks spgemm for cases like C = A * A
           ///  check if parent's and child's upper bounds come from the same sparse tensor
-          auto alloc_parent_bounds = findCorrespondingAlloc(parent_UpperBound);
-          comet_debug() << " parent upperBound alloc\n";
-          comet_vdump(alloc_parent_bounds);
+          /// auto parent_UpperBound = parent_forop.getUpperBound();
+          /// comet_debug() << " parent upperBound:\n";
+          /// comet_vdump(parent_UpperBound);
+          /// auto alloc_parent_bounds = findCorrespondingAlloc(parent_UpperBound);
+          /// comet_debug() << " parent upperBound alloc\n";
+          /// comet_vdump(alloc_parent_bounds);
 
-          comet_debug() << " child upperBound:\n";
-          comet_vdump(allAllocs[i][4 * id]);
-          auto alloc_child_bounds = findCorrespondingAlloc(allAllocs[i][4 * id]);
-          comet_debug() << " child upperBound alloc\n";
-          comet_vdump(alloc_child_bounds);
+          /// comet_debug() << " child upperBound:\n";
+          /// comet_vdump(allAllocs[i][4 * id]);
+          /// auto alloc_child_bounds = findCorrespondingAlloc(allAllocs[i][4 * id]);
+          /// comet_debug() << " child upperBound alloc\n";
+          /// comet_vdump(alloc_child_bounds);
 
-          if (alloc_child_bounds == alloc_parent_bounds) /// m is the nearest loop induction variable
-          {
-            comet_debug() << " THESAME: Parent and Child has the same alloc\n";
-            index_lower = parent_forop.getInductionVar();
-          }
-          else
+          // if (alloc_child_bounds == alloc_parent_bounds) /// m is the nearest loop induction variable
+          // {
+          //   comet_debug() << " THESAME: Parent and Child has the same alloc\n";
+          //   index_lower = parent_forop.getInductionVar();
+          // }
+          // else
           { /// m comes from the load
             comet_debug() << " DIFFERENT:Parent and Child has the different alloc\n";
             comet_vdump(alloc_parent_bounds);
@@ -2110,12 +2082,15 @@ namespace
           }
           else
           {
+            builder.setInsertionPoint(forLoops[1]); /// [PT] This is needed to make sure we can access the values created outside of the loop
             comet_debug() << " This dimension is a static size\n";
             upperBound = builder.create<ConstantIndexOp>(loc, dimSize);
             comet_vdump(upperBound);
           }
+
           denseDimsSize.push_back(upperBound);
         }
+        builder.setInsertionPointAfter(forLoops[0]);
 
         /// To update Cpos
         if (sparse_format.compare("CSR") == 0)
@@ -4241,15 +4216,15 @@ void LowerIndexTreeToSCFPass::doLoweringIndexTreeToSCF(indexTree::IndexTreeOp &r
 
   std::vector<mlir::Value> wp_ops;
   dfsRootOpTree(rootOp.getChildren(), wp_ops);
-#ifdef DEBUG_MODE_LowerIndexTreeToSCFPass
+  // #ifdef DEBUG_MODE_LowerIndexTreeToSCFPass
   comet_debug() << " wp_ops.size(): " << wp_ops.size() << "\n";
-  for (auto n : wp_ops)
+  for ([[maybe_unused]] auto n : wp_ops)
   {
     comet_debug() << " ";
     comet_vdump(n);
     /// Declare opsTree
   }
-#endif
+  // #endif
 
   /// In ops vector, for each op, the parent of each op can get from getUsers()
   /// Since it's a tree structure, only one user ==> which is the parent

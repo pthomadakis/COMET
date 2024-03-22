@@ -49,7 +49,7 @@ using namespace mlir::bufferization;
 using namespace mlir::tensorAlgebra;
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -84,12 +84,11 @@ static bool arePermutations(const std::vector<T> &vec1,
 /// Detect whether memref dims [dim, dim + extent) can be reshaped without
 /// copies.
 [[maybe_unused]] static bool isReshapableDimBand(unsigned dim, unsigned extent,
-                                ArrayRef<int64_t> sizes,
-                                ArrayRef<AffineExpr> strides)
+                                                 ArrayRef<int64_t> sizes,
+                                                 ArrayRef<AffineExpr> strides)
 {
   assert(sizes.size() == strides.size() && "mismatched ranks");
   /// off by 1 indexing to avoid out of bounds
-  ///                       V
   for (auto idx = dim, e = dim + extent; idx + 1 < e; ++idx)
   {
     /// Only bands of static shapes are reshapable. This is due to the fact that
@@ -190,15 +189,8 @@ namespace
         {
           setnewop = cast<tensorAlgebra::TensorSetOp>(u);
           Value dstTensor = u->getOperand(1);
-          if (isa<tensorAlgebra::LabeledTensorOp>(dstTensor.getDefiningOp()))
-          {
-            Value dstTensor_labeledTensor = cast<tensorAlgebra::LabeledTensorOp>(dstTensor.getDefiningOp());
-            lhsDef = dstTensor_labeledTensor.getDefiningOp()->getOperand(0);
-          }
-          else
-          { /// if(isa<ToTensorOp>(dstTensor.getOperation())){
-            lhsDef = dstTensor;
-          }
+
+          lhsDef = dstTensor;
           comet_vdump(lhsDef);
         }
       }
@@ -268,15 +260,20 @@ namespace
       /// Do transpose if needed
       if (!rhs1OutMapAttr.getValue().isIdentity())
       {
+        std::vector<Value> operands;
         std::vector<int64_t> rhs1Dims;
         for (auto idx : rhs1OutPerm)
         {
           auto shape = rhs1MemrefType.getShape();
           rhs1Dims.push_back(shape[idx]);
+          if (rhs1MemrefType.isDynamicDim(idx))
+          {
+            operands.push_back(rhs1Memref.getDefiningOp()->getOperand(rhs1MemrefType.getDynamicDimIndex(idx)));
+          }
         }
 
-        rhs1Alloc = insertAllocAndDealloc(
-            MemRefType::get(rhs1Dims, rhs1MemrefType.getElementType()), loc,
+        rhs1Alloc = insertAllocAndDeallocDynamic(
+            MemRefType::get(rhs1Dims, rhs1MemrefType.getElementType()), operands, loc,
             rewriter);
 
 #ifdef DEBUG_MODE_TTGT
@@ -290,15 +287,20 @@ namespace
 
       if (!rhs2OutMapAttr.getValue().isIdentity())
       {
+        std::vector<Value> operands;
         std::vector<int64_t> rhs2Dims;
         for (auto idx : rhs2OutPerm)
         {
           auto shape = rhs2MemrefType.getShape();
           rhs2Dims.push_back(shape[idx]);
+          if (rhs2MemrefType.isDynamicDim(idx))
+          {
+            operands.push_back(rhs2Memref.getDefiningOp()->getOperand(rhs2MemrefType.getDynamicDimIndex(idx)));
+          }
         }
 
-        rhs2Alloc = insertAllocAndDealloc(
-            MemRefType::get(rhs2Dims, rhs2MemrefType.getElementType()), loc,
+        rhs2Alloc = insertAllocAndDeallocDynamic(
+            MemRefType::get(rhs2Dims, rhs2MemrefType.getElementType()), operands, loc,
             rewriter);
 #ifdef DEBUG_MODE_TTGT
         auto rhs2LinalgCopy = rewriter.create<linalg::TransposeOp>(loc, rhs2Memref, rhs2Alloc, llvm::ArrayRef<int64_t>(rhs2OutPerm_int64));
@@ -313,15 +315,20 @@ namespace
       bool useLHSTranspose = false;
       if (!lhsOutMapAttr.getValue().isIdentity())
       {
+        std::vector<Value> operands;
         std::vector<int64_t> lhsDims;
         for (auto idx : lhsOutPerm)
         {
           auto shape = lhsMemrefType.getShape();
           lhsDims.push_back(shape[idx]);
+          if (lhsMemrefType.isDynamicDim(idx))
+          {
+            operands.push_back(lhsMemref.getDefiningOp()->getOperand(lhsMemrefType.getDynamicDimIndex(idx)));
+          }
         }
 
-        lhsAlloc = insertAllocAndDealloc(
-            MemRefType::get(lhsDims, lhsMemrefType.getElementType()), loc,
+        lhsAlloc = insertAllocAndDeallocDynamic(
+            MemRefType::get(lhsDims, lhsMemrefType.getElementType()), operands, loc,
             rewriter);
         useLHSTranspose = true;
         double beta_val = betaAttr.cast<FloatAttr>().getValueAsDouble();
@@ -348,7 +355,12 @@ namespace
       bool isRHS1SumPermutation = arePermutations(allPerms[0], sumIndices);
       bool isRHS2SumPermutation = arePermutations(allPerms[1], sumIndices);
 
-      comet_debug() << __LINE__ << "mIdxSize, nIdxSize, kIdxSize: " << mIdxSize << ", " << nIdxSize << ", " << kIdxSize << " isRHS1SumPermutation, isRHS2SumPermutation: " << isRHS1SumPermutation << ", " << isRHS2SumPermutation << "\n";
+      comet_debug() << __LINE__ << "mIdxSize, nIdxSize, kIdxSize: "
+                    << mIdxSize << ", "
+                    << nIdxSize << ", "
+                    << kIdxSize << " isRHS1SumPermutation, isRHS2SumPermutation: "
+                    << isRHS1SumPermutation << ", "
+                    << isRHS2SumPermutation << "\n";
 
       /// Do reshape if needed
       if (isRHS1SumPermutation)
@@ -550,7 +562,7 @@ namespace
         matvecop.getOperation()->setAttr("__alpha__", alphaAttr);
         matvecop.getOperation()->setAttr("__beta__", betaAttr);
 
-        /// Add attribute to the linalg.matvec operations
+        /// TODO(gkestor): Add attribute to the linalg.matvec operations
         /// matvecop.setAttr(kLinalgTransformMarker, rewriter.getStringAttr(kLinalgTransformMarker));
       }
       else if (isRHS2SumPermutation)
@@ -568,7 +580,7 @@ namespace
         matvecop.getOperation()->setAttr("__alpha__", alphaAttr);
         matvecop.getOperation()->setAttr("__beta__", betaAttr);
 
-        /// Add attribute to the linalg.matvec operations
+        /// TODO(gkestor): Add attribute to the linalg.matvec operations
         /// matvecop.setAttr(kLinalgTransformMarker, rewriter.getStringAttr(kLinalgTransformMarker));
       }
       else

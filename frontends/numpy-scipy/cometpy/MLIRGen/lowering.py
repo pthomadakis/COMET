@@ -28,6 +28,7 @@ import sys
 import time
 import ctypes
 from ctypes import *
+import cometpy.cfg as cfg
 import atexit
 import uuid
 import scipy as scp
@@ -35,16 +36,22 @@ debug = False
 temp_dir = '.cometpy/'
 
 if not os.path.exists(temp_dir):
-    os.mkdir(temp_dir)
+    try:
+        os.mkdir(temp_dir)
+    except:
+        if os.path.exists(temp_dir):
+            pass
+        else:
+            raise "Could not create .cometpy/"
 
 platform_args = ""
 
 
 if("macOS" in platform.platform()):
-    comet_runner_util = "../build/lib/libcomet_runner_utils.dylib"
+    comet_runner_util = cfg.comet_path+"/lib/libcomet_runner_utils.dylib"
     platform_args = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/ "
 elif("Linux" in platform.platform()):
-    comet_runner_util = "../build/lib/libcomet_runner_utils.so"
+    comet_runner_util = cfg.comet_path+"/lib/libcomet_runner_utils.so"
 else:
     print("error: Support available only for Linux and macOS")
     sys.exit()
@@ -55,8 +62,6 @@ def cleanup():
             os.remove(f)
             # pass
 atexit.register(cleanup)
-p = subprocess.run(['../llvm/build/bin/llvm-config', '--host-target'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-llvm_cfg_out = p.stdout.decode().strip()  # This only needs to run once and should be possible to generate at compile time
 
 class memref_i64(Structure):
     _fields_ = [ ('mem_aligned', POINTER(c_longlong)), ('mem', POINTER(c_longlong)), ('offset', c_longlong), ('dim', c_longlong), ('stride', c_longlong)]
@@ -99,7 +104,7 @@ def lower_ta_to_mlir(mlir_in, mlir_lower_flags, uuid_s):
     else:
         f = open(scf_out_file, 'wb')
 
-    path_to_comet = "../build/bin/comet-opt"
+    path_to_comet = cfg.comet_path+"/bin/comet-opt"
 
     command = path_to_comet + mlir_lower_flags + mlir_in
 
@@ -140,7 +145,10 @@ def comment_unneeded_dense(input_, arg_vals):
             for j in range(len(input[:i])):
                 if cast + " = memref.cast" in input[j]:
                     out = input[j][input[j].find("%alloc")  : input[j].find(":")].lstrip().strip()
-                    replace['%arg'+str(len(arg_vals))] = out
+                    
+                    start = input[j].find(":")
+                    end = input[j][start:].find("to")
+                    replace['%arg'+str(len(arg_vals))] = out +" " + input[j][start:start+end].lstrip().strip()
                     for k in range(len(input[:j])):
                         if out+" = memref.alloc(" in  input[k]:
                             # input[k] = "//from dense" + input[k]
@@ -148,7 +156,8 @@ def comment_unneeded_dense(input_, arg_vals):
         elif allocs_needed > 0 and "memref.alloc" in input[i]:
             allocs_needed = allocs_needed - 1
             a = input[i][input[i].find("%") : input[i].find("=")].lstrip().strip()
-            replace['%arg'+str(indexes[0])] = a
+            start = input[i].rfind(":")
+            replace['%arg'+str(indexes[0])] = a +" " + input[i][start:].lstrip().strip()
             indexes = indexes[1:]
             # input[i] = "//from dense" + input[i]
             input[i] = ""
@@ -162,7 +171,12 @@ def comment_unneeded_dense(input_, arg_vals):
                     break
 
     for v in replace:
-        input[1] = input[1].replace(v, replace[v])
+        start = input[1].find(v)
+        end = input[1][start:].find(",")
+        if end == -1 :
+            end = input[1][start:].find(")")
+        repl = input[1][start:start+end]
+        input[1] = input[1].replace(repl, replace[v])
             
     output = ""
 
@@ -173,7 +187,6 @@ def comment_unneeded_dense(input_, arg_vals):
     return output            
 
 def comment_unneeded_sparse(input_, arg_vals):
-    # print(input_)
     output = ""
     input = input_.splitlines()
     indexes = []
@@ -312,30 +325,30 @@ def comment_unneeded_sparse(input_, arg_vals):
 
 def lower_ta_to_mlir_with_jit(mlir_in, mlir_lower_flags, arg_vals, uuid_s):
 
-    path_to_comet = "../build/bin/comet-opt"
-    command = path_to_comet + mlir_lower_flags + mlir_in
-    p = subprocess.run(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,close_fds=False)
+    path_to_comet = cfg.comet_path+"/bin/comet-opt -x mlir "
+    command = path_to_comet + mlir_lower_flags
+    p = subprocess.run(shlex.split(command), input = mlir_in.encode('utf-8') , stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,close_fds=False)
     if p.returncode != 0:
         cleanup()
         raise AssertionError("comet-opt failed with error code: {}. Error: {}".format(p.returncode, p.stderr.decode()))
 
 
-    scf_out_file = temp_dir + uuid_s+'loops.mlir'
+    # scf_out_file = temp_dir + uuid_s+'loops.mlir'
 
-    if(os.path.exists(scf_out_file) == False):
-        f = open(os.path.join( os.getcwd(), scf_out_file), 'w')
-        files_to_cleanup.append(os.path.join( os.getcwd(), scf_out_file))
-    else:
-        f = open(scf_out_file, 'w')
-        files_to_cleanup.append(os.path.join( os.getcwd(), scf_out_file))
+    # if(os.path.exists(scf_out_file) == False):
+    #     f = open(os.path.join( os.getcwd(), scf_out_file), 'w')
+    #     files_to_cleanup.append(os.path.join( os.getcwd(), scf_out_file))
+    # else:
+    #     f = open(scf_out_file, 'w')
+    #     files_to_cleanup.append(os.path.join( os.getcwd(), scf_out_file))
 
     scf_out  = p.stderr.decode()
     scf_out = comment_unneeded_sparse(scf_out, arg_vals)
     scf_out = comment_unneeded_dense(scf_out, arg_vals)
-    f.write(scf_out)
-    f.close()
+    # f.write(scf_out)
+    # f.close()
 
-    return scf_out_file
+    return scf_out
 
 
 def lower_scf_to_llvm(scf_in, scf_lower_flags, uuid_s):
@@ -343,7 +356,7 @@ def lower_scf_to_llvm(scf_in, scf_lower_flags, uuid_s):
     # llvm_out_file = 'einsum.llvm'
 
     # path_to_mliropt = "../llvm/build/bin/mlir-opt"
-    path_to_cometopt = "../build/bin/comet-opt"
+    path_to_cometopt = cfg.comet_path+"/bin/comet-opt"
 
     command = path_to_cometopt + scf_lower_flags + scf_in
     # command = path_to_cometopt + scf_lower_flags + ' 38ee2ea1-6e20-439f-b7c0-73d7fa6b7da5loops.mlir'
@@ -492,18 +505,19 @@ def translate_and_exec_llvm_with_jit(llvm_in,scf_lower_flags, func_name, inputs,
 
     llvmir_file = uuid_s+'.ll'
 
-    path_to_cometopt = "../build/bin/comet-opt"
-    to_llvm_command = path_to_cometopt + scf_lower_flags + llvm_in
-    translate_mlir_command = "../llvm/build/bin/mlir-translate --mlir-to-llvmir -- " 
+    # path_to_cometopt = cfg.comet_path+"/bin/comet-opt"
+    path_to_cometopt = cfg.comet_path+"/bin/comet-opt -x mlir"
+    to_llvm_command = path_to_cometopt + scf_lower_flags #+ llvm_in
+    translate_mlir_command = cfg.llvm_path+"/bin/mlir-translate --mlir-to-llvmir -- " 
 
     libname =   "./lib"+llvmir_file+func_name+".so"
-    gcc_command = "../llvm/build/bin/clang -march=native -mtune=native -x ir -Wno-everything --shared -O3 "+platform_args+ " -o "+ temp_dir + libname+" -fpic -L ../build/lib/ -Wl,-rpath,../build/lib/ -lcomet_runner_utils -"
+    gcc_command = cfg.llvm_path+"/bin/clang -march=native -mtune=native -x ir -Wno-everything --shared -O3 "+platform_args+ " -o "+ temp_dir + libname+" -fpic -L {0}/lib/ -Wl,-rpath,{0}/lib/ -lcomet_runner_utils -".format(cfg.comet_path)
 
     # We merge all several calls in a single call to the shell in order to only pay the overhead of process creation once.
     # 1. Call comet to lower scf code to llvm
     # 2. Call mlir-translate to convert llvm to llvmir 
     # 3. Call clang to generate library
-    p = subprocess.run(to_llvm_command +' 2>&1 |  '+ translate_mlir_command +' | ' + gcc_command , stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    p = subprocess.run(to_llvm_command +' 2>&1 |  '+ translate_mlir_command +' | ' + gcc_command , input=llvm_in.encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 
     if(p.returncode != 0):
         cleanup()
@@ -632,7 +646,7 @@ def lower_dialect(ta_dialect_rep, out_dims, compile_with_flags,func_name):
     uuid_s = str(uuid.uuid4())
     ta_dialect_file = uuid_s+'.mlir'
     # print("uuid_s: ", uuid_s)
-    if(os.path.exists(ta_dialect_file) == False):
+    if(os.path.exists(ta_dialect_file) is False):
         f = open(os.path.join( os.getcwd(), ta_dialect_file), 'w')
         files_to_cleanup.append(os.path.join( os.getcwd(), ta_dialect_file))
     else:
@@ -682,17 +696,18 @@ def lower_dialect_with_jit(ta_dialect_rep, out_dims, compile_with_flags,func_nam
 
     uuid_s = str(uuid.uuid4())
     ta_dialect_file = temp_dir+uuid_s+'.mlir'
-    if(os.path.exists(ta_dialect_file) == False):
-        f = open(os.path.join( os.getcwd(), ta_dialect_file), 'w')
-        files_to_cleanup.append(os.path.join( os.getcwd(), ta_dialect_file))
-    else:
-        f = open(ta_dialect_file, 'w')
+    # if(os.path.exists(ta_dialect_file) == False):
+    #     f = open(os.path.join( os.getcwd(), ta_dialect_file), 'w')
+    #     files_to_cleanup.append(os.path.join( os.getcwd(), ta_dialect_file))
+    # else:
+    #     f = open(ta_dialect_file, 'w')
     
-    f.write(ta_dialect_rep)
-    f.close()
+    # f.write(ta_dialect_rep)
+    # f.close()
 
     # Convert TA to SCF
-    scf_out_file = lower_ta_to_mlir_with_jit(ta_dialect_file, mlir_lower_flags, args_vals, uuid_s)
+    # scf_out_file = lower_ta_to_mlir_with_jit(ta_dialect_file, mlir_lower_flags, args_vals, uuid_s)
+    scf_out_file = lower_ta_to_mlir_with_jit(ta_dialect_rep, mlir_lower_flags, args_vals, uuid_s)
 
     #lower the SCF dialect to LLVMIR and execute
     result,llvmir_file = translate_and_exec_llvm_with_jit(scf_out_file, scf_lower_flags, func_name, args_vals, outputs, uuid_s)

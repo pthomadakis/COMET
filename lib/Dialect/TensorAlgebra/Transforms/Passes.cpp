@@ -35,7 +35,7 @@
 #include <map>
 #include <set>
 #include <stack>
-
+// #include <iostream>
 #define DEBUG_TYPE "comet-passes"
 
 using namespace mlir;
@@ -44,7 +44,7 @@ using namespace mlir::bufferization;
 using namespace tensorAlgebra;
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -64,14 +64,6 @@ namespace
 
 namespace
 {
-
-  struct LowerTAMulChainPass
-      : public PassWrapper<LowerTAMulChainPass, OperationPass<func::FuncOp>>
-  {
-    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerTAMulChainPass)
-    void runOnOperation() override;
-  };
-
   struct OptDenseTransposePass
       : public PassWrapper<OptDenseTransposePass, OperationPass<func::FuncOp>>
   {
@@ -231,7 +223,6 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
   auto operands = op->getOperands();
   auto loc = op->getLoc();
   auto lhsOp = operands[0].getDefiningOp(); ///  TensorMultOp
-  auto rhsOp = operands[1].getDefiningOp();
 
   std::vector<Operation *> MultOpsToRemove;
   std::vector<Operation *> LTOpsToRemove;
@@ -240,11 +231,15 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
   std::map<Operation *, Value> inLTValues;
 
   comet_debug() << "Chain Multiplication Factorization begin...\n";
+  std::map<Operation *, int64_t> lblSizes;
+  std::map<Operation *, Value> labelValues;
+  std::map<Operation *, std::vector<Operation *>> lblMaps;
 
   ///  collect all operands from series of ta.tc ops
   if (isa<tensorAlgebra::TensorMultOp>(lhsOp))
   {
     std::stack<Operation *> stack;
+
     Value currValue = operands[0];
     comet_vdump(currValue);
     Operation *curr = currValue.getDefiningOp();
@@ -252,8 +247,72 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
     {
       while (isa<tensorAlgebra::TensorMultOp>(curr))
       {
+        auto multop = cast<tensorAlgebra::TensorMultOp>(curr);
         stack.push(curr);
-        MultOpsToRemove.push_back(cast<tensorAlgebra::TensorMultOp>(curr).getOperation());
+        MultOpsToRemove.push_back(multop.getOperation());
+        std::vector<mlir::Value> labels = multop.getRhs2IndexLabels();
+        std::vector<Operation *> labelVec;
+
+        for (size_t i = 0; i < labels.size(); i++)
+        {
+          auto lblOp = labels[i].getDefiningOp();
+          if (lblSizes.count(lblOp) == 0)
+          {
+            /// If dynamic dimension, we need to retrieve the value of the constantIndexOp that was used to create it
+            /// If static, just get it from the tensor type
+            if (isa<tensorAlgebra::DenseTensorDeclOp>(multop.getRhs2().getDefiningOp()))
+            {
+              if (multop.getRhs2().getType().cast<TensorType>().isDynamicDim(i))
+              {
+                ConstantIndexOp val = cast<ConstantIndexOp>(multop.getRhs2().getDefiningOp()->getOperand(multop.getRhs2().getType().cast<TensorType>().getDynamicDimIndex(i)).getDefiningOp());
+                lblSizes[lblOp] = val.value();
+              }
+              else
+              {
+                lblSizes[lblOp] = multop.getRhs2().getType().cast<TensorType>().getDimSize(i);
+              }
+            }
+            labelValues[lblOp] = labels[i];
+          }
+          labelVec.push_back(lblOp);
+        }
+        if (isa<tensorAlgebra::DenseTensorDeclOp>(multop.getRhs2().getDefiningOp()))
+        {
+          lblMaps[multop.getRhs2().getDefiningOp()] = labelVec;
+        }
+
+        labelVec.clear();
+        labels = multop.getRhs1IndexLabels();
+        for (size_t i = 0; i < labels.size(); i++)
+        {
+          auto lblOp = labels[i].getDefiningOp();
+          if (lblSizes.count(lblOp) == 0)
+          {
+            /// If dynamic dimension, we need to retrieve the value of the constantIndexOp that was used to create it
+            /// If static, just get it from the tensor type
+            if (isa<tensorAlgebra::DenseTensorDeclOp>(multop.getRhs1().getDefiningOp()))
+            {
+              if (multop.getRhs1().getType().cast<TensorType>().isDynamicDim(i))
+              {
+                ConstantIndexOp val = cast<ConstantIndexOp>(multop.getRhs1().getDefiningOp()->getOperand(multop.getRhs1().getType().cast<TensorType>().getDynamicDimIndex(i)).getDefiningOp());
+                lblSizes[lblOp] = val.value();
+              }
+              else
+              {
+                lblSizes[lblOp] = multop.getRhs1().getType().cast<TensorType>().getDimSize(i);
+              }
+            }
+
+            labelValues[lblOp] = labels[i];
+          }
+          labelVec.push_back(lblOp);
+        }
+
+        if (isa<tensorAlgebra::DenseTensorDeclOp>(multop.getRhs1().getDefiningOp()))
+        {
+          lblMaps[multop.getRhs1().getDefiningOp()] = labelVec;
+        }
+
         currValue = cast<tensorAlgebra::TensorMultOp>(curr).getOperation()->getOperand(1);
         curr = currValue.getDefiningOp();
       }
@@ -270,30 +329,7 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
     inLTValues[curr] = currValue;
   }
 
-  std::map<Operation *, Value> labelValues;
-  ///  IndexLabelStaticOp to size map
-  std::map<Operation *, int64_t> lblSizes;
-  ///  LabeledTensorOp to label set map
-  std::map<Operation *, std::vector<Operation *>> lblMaps;
-
-  for (auto op : inLTOps)
-  {
-    auto labels = cast<tensorAlgebra::DenseTensorDeclOp>(op).getLabels();
-    std::vector<Operation *> labelVec;
-    for (auto lbl : labels)
-    {
-      auto lblOp = lbl.getDefiningOp();
-      if (lblSizes.count(lblOp) == 0)
-      {
-        lblSizes[lblOp] = mlir::tensorAlgebra::labelSize(lblOp);
-        labelValues[lblOp] = lbl;
-      }
-      labelVec.push_back(lblOp);
-    }
-    lblMaps[op] = labelVec;
-  }
-
-  auto outLabels = cast<tensorAlgebra::DenseTensorDeclOp>(rhsOp).getLabels();
+  auto outLabels = cast<tensorAlgebra::TensorMultOp>(lhsOp).getResultIndexLabels();
   std::vector<Operation *> outLabelVec;
   for (auto lbl : outLabels)
   {
@@ -329,7 +365,6 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
       std::vector<Operation *> rhs2Labels = lblMaps.at(inLTOps[order[i]]);
       std::set<Operation *> remainingLabels(lblMaps.at(lhsOp).begin(),
                                             lblMaps.at(lhsOp).end());
-
       for (size_t j = i + 1; j < order.size(); j++)
       {
         auto lblSet = lblMaps.at(inLTOps[order[j]]);
@@ -351,16 +386,14 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
       std::vector<Value> new_all_lbls_value;
       std::vector<Value> new_lhs_lbls_value;
       std::vector<Value> new_rhs_lbls_value;
-      for (auto lbl : rhs2Labels)
-      {
-        new_lhs_lbls_value.push_back(labelValues[lbl]);
-        new_all_lbls_value.push_back(labelValues[lbl]);
-      }
+
       if (isa<tensorAlgebra::TensorMultOp>(newRhs1.getDefiningOp()))
       { ///  retrieve the labels from prev iteration.
         new_rhs_lbls_value = ___newSumLabels;
         for (auto lbl : new_rhs_lbls_value)
         {
+          comet_vdump(lbl);
+
           auto result1 = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), lbl);
           if (result1 == new_all_lbls_value.end())
           {
@@ -372,12 +405,35 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
       { ///  retrieve the labels from lblMaps
         for (auto lbl : rhs1Labels)
         {
+          comet_pdump(lbl);
+          comet_debug() << labelValues[lbl] << "\n";
+          if (labelValues.find(lbl) == labelValues.end())
+          {
+            exit(11);
+          }
           new_rhs_lbls_value.push_back(labelValues[lbl]);
           auto result1 = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), labelValues[lbl]);
           if (result1 == new_all_lbls_value.end())
           {
             new_all_lbls_value.push_back(labelValues[lbl]);
           }
+        }
+      }
+
+      for (auto lbl : rhs2Labels)
+      {
+        comet_pdump(lbl);
+        comet_debug() << labelValues[lbl] << "\n";
+
+        if (labelValues.find(lbl) == labelValues.end())
+        {
+          exit(11);
+        }
+        new_lhs_lbls_value.push_back(labelValues[lbl]);
+        auto result1 = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), labelValues[lbl]);
+        if (result1 == new_all_lbls_value.end())
+        {
+          new_all_lbls_value.push_back(labelValues[lbl]);
         }
       }
 
@@ -409,32 +465,49 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
 
       std::vector<int> lhs_lbls;
       std::vector<int> rhs_lbls;
-      for (unsigned int i = 0; i < new_all_lbls_value.size(); i++)
-      {
-        auto result1 = std::find(new_lhs_lbls_value.begin(), new_lhs_lbls_value.end(), new_all_lbls_value[i]);
-        if (result1 != new_lhs_lbls_value.end())
-        {
-          lhs_lbls.push_back(i);
-        }
+      std::vector<Value> all_labels;
 
-        auto result2 = std::find(new_rhs_lbls_value.begin(), new_rhs_lbls_value.end(), new_all_lbls_value[i]);
-        if (result2 != new_rhs_lbls_value.end())
-        {
-          rhs_lbls.push_back(i);
-        }
+      for (auto e : new_rhs_lbls_value)
+      {
+        all_labels.push_back(e);
+        auto index = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), e) - new_all_lbls_value.begin();
+        comet_debug() << index << " " << new_all_lbls_value[index] << "\n";
+
+        rhs_lbls.push_back(index);
       }
 
-      std::vector<int> sum_lbls;
-      std::set_intersection(lhs_lbls.begin(), lhs_lbls.end(), rhs_lbls.begin(), rhs_lbls.end(), std::back_inserter(sum_lbls));
-      std::vector<int> all_lbls;
-      std::set_union(lhs_lbls.begin(), lhs_lbls.end(), rhs_lbls.begin(), rhs_lbls.end(), std::back_inserter(all_lbls));
+      for (auto e : new_lhs_lbls_value)
+      {
+        all_labels.push_back(e);
+        auto index = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), e) - new_all_lbls_value.begin();
+        comet_debug() << index << " " << new_all_lbls_value[index] << "\n";
+        lhs_lbls.push_back(index);
+      }
+
       std::vector<int> ret_lbls;
-      std::set_difference(all_lbls.begin(), all_lbls.end(), sum_lbls.begin(), sum_lbls.end(), std::back_inserter(ret_lbls));
+
+      for (auto e : newSumLabels)
+      {
+        all_labels.push_back(e);
+        auto index = std::find(new_all_lbls_value.begin(), new_all_lbls_value.end(), e) - new_all_lbls_value.begin();
+        comet_debug() << index << " " << new_all_lbls_value[index] << "\n";
+
+        ret_lbls.push_back(index);
+      }
+
+      comet_debug() << "\n";
+      auto sorted_lhs = lhs_lbls;
+      std::sort(sorted_lhs.begin(), sorted_lhs.end());
+      auto sorted_rhs = rhs_lbls;
+      std::sort(sorted_rhs.begin(), sorted_rhs.end());
+      std::vector<int> all_lbls;
+      std::set_union(sorted_lhs.begin(), sorted_lhs.end(), sorted_rhs.begin(), sorted_rhs.end(), std::back_inserter(all_lbls));
 
       std::map<int, mlir::AffineExpr> expr_map;
       unsigned dim = 0;
       for (const auto &lbl : all_lbls)
       {
+        comet_debug() << "All LBLS: " << lbl << "\n";
         expr_map[lbl] = getAffineDimExpr(dim++, builder.getContext());
       }
 
@@ -462,11 +535,10 @@ void FindOptimalTCFactorizationPass::FindOptimalTCFactorization(tensorAlgebra::T
           mlir::AffineMap::get(dim, 0, lhs_exprs, context),
           mlir::AffineMap::get(dim, 0, ret_exprs, context)};
       auto affineMapArrayAttr = builder.getAffineMapArrayAttr(affine_maps);
-
       auto SemiringAttr = builder.getStringAttr("plusxy_times");
       auto MaskingAttr = builder.getStringAttr("none");
       Value tcop = builder.create<tensorAlgebra::TensorMultOp>(loc, newType, newRhs1, newRhs2,
-                                                               newSumLabels, affineMapArrayAttr, strAttr, SemiringAttr,
+                                                               all_labels, affineMapArrayAttr, strAttr, SemiringAttr,
                                                                MaskingAttr, nullptr);
       tcop.getDefiningOp()->setAttr("__alpha__", builder.getF64FloatAttr(1.0));
       tcop.getDefiningOp()->setAttr("__beta__", builder.getF64FloatAttr(0.0));
@@ -497,41 +569,6 @@ void FindOptimalTCFactorizationPass::runOnOperation()
             { FindOptimalTCFactorization(op); });
 }
 
-void LowerTAMulChainPass::runOnOperation()
-{
-  func::FuncOp function = getOperation();
-  RewritePatternSet patterns(&getContext());
-  populateLowerTAMulChainPatterns(patterns, &getContext());
-
-  ConversionTarget target(getContext());
-  target.addLegalDialect<ArithDialect>();
-
-  target.addLegalOp<tensorAlgebra::PrintOp,
-                    tensorAlgebra::TAReturnOp,
-                    tensorAlgebra::ReduceOp,
-                    tensorAlgebra::TransposeOp,
-                    tensorAlgebra::TensorFillOp,
-                    tensorAlgebra::TensorFillFromFileOp,
-                    tensorAlgebra::GetTimeOp,
-                    tensorAlgebra::PrintElapsedTimeOp,
-                    tensorAlgebra::TensorMultOp,
-                    tensorAlgebra::TensorElewsMultOp,
-                    tensorAlgebra::TensorSetOp,
-                    tensorAlgebra::ChainMulOp,
-                    tensorAlgebra::TensorCopyOp,
-                    tensorAlgebra::IndexLabelDynamicOp,
-                    tensorAlgebra::IndexLabelStaticOp,
-                    tensorAlgebra::SparseTensorDeclOp,
-                    tensorAlgebra::DenseTensorDeclOp,
-                    tensorAlgebra::SparseTensorConstructOp>();
-
-  if (failed(applyPartialConversion(function, target, std::move(patterns))))
-  {
-    llvm::errs() << "Failed to applyPartialConversion in LowerTAMulChainPass\n";
-    signalPassFailure();
-  }
-}
-
 void STCRemoveDeadOpsPass::runOnOperation()
 {
   comet_debug() << " start STCRemoveDeadOpsPass \n";
@@ -556,11 +593,6 @@ void STCRemoveDeadOpsPass::runOnOperation()
 std::unique_ptr<Pass> mlir::comet::createFindOptimalTCFactorizationPass()
 {
   return std::make_unique<FindOptimalTCFactorizationPass>();
-}
-
-std::unique_ptr<Pass> mlir::comet::createLowerTAMulChainPass()
-{
-  return std::make_unique<LowerTAMulChainPass>();
 }
 
 ///  Lower sparse tensor algebra operation to loops

@@ -245,15 +245,6 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
   pm.addPass(mlir::comet::createFuncOpLoweringPass());
 
   mlir::OpPassManager &optPM = pm.nest<mlir::func::FuncOp>();
-  optPM.addPass(mlir::comet::createRemoveLabeledTensorOpsPass());
-
-  /// Check to see if we are dumping to TA dialect.
-  if (emitTA)
-  {
-    if (mlir::failed(pm.run(*module)))
-      return 4;
-    return 0;
-  }
 
   ///  =============================================================================
   ///  High-level optimization at the TA dialect
@@ -268,15 +259,19 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
     optPM.addPass(mlir::comet::createFindOptimalTCFactorizationPass());
   }
 
-  optPM.addPass(mlir::comet::createLowerTAMulChainPass()); /// Lowering for chain operations
-  ///  =============================================================================
-
   ///  =============================================================================
   ///  Check if there are missing tensor declaration operations introduced by compound expressions.
   ///  If so, add a new tensor declaration to represent intermediate tensors
   ///  =============================================================================
   optPM.addPass(mlir::comet::createTensorAlgebraCheckImplicitTensorDeclPass());
   ///  =============================================================================
+  /// Check to see if we are dumping to TA dialect.
+  if (emitTA)
+  {
+    if (mlir::failed(pm.run(*module)))
+      return 4;
+    return 0;
+  }
 
   /// ===================================================================================
   /// Lowering of TC (tensor contraction) operation to Index Tree dialect
@@ -319,7 +314,6 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
   /// sparse input tensor declaration lowering, also generate sparse_output_tensor declaration if needed
   /// input and output sparse tensor declaration lowering are distant and need different information
   optPM.addPass(mlir::comet::createSparseTensorDeclLoweringPass());
-  // optPM.addPass(mlir::comet::createSparseOutputTensorDeclLoweringPass());
   optPM.addPass(mlir::comet::createDenseTensorDeclLoweringPass());
   optPM.addPass(mlir::comet::createTensorFillLoweringPass());
 
@@ -356,6 +350,9 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
                                                                                 /// should be lowered before sparse output tensor declarations
     optPM.addPass(mlir::comet::createSparseOutputTensorDeclLoweringPass());     /// lowering for sparse output tensor declarations
                                                                                 //(sparse_output_tensor_decl and temp_sparse_output_tensor_decl)
+
+    optPM.addPass(mlir::comet::createDimOpLoweringPass());
+
     /// The partial Fusion pass might add new tensor.fill operations
     optPM.addPass(mlir::comet::createTensorFillLoweringPass());
     optPM.addPass(mlir::comet::createPCToLoopsLoweringPass());
@@ -384,6 +381,8 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
     /// Dump index tree dialect.
     if (emitLoops)
     {
+      pm.addPass(mlir::createCanonicalizerPass());
+      pm.addPass(mlir::createCSEPass());
       if (mlir::failed(pm.run(*module)))
         return 4;
       return 0;
@@ -397,13 +396,14 @@ int loadAndProcessMLIR(mlir::MLIRContext &context,
 
   optPM.addPass(mlir::comet::createSTCRemoveDeadOpsPass());
   optPM.addPass(mlir::comet::createLateLoweringPass());
-  optPM.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCanonicalizerPass());
   optPM.addPass(mlir::createCSEPass());
 
   /// =============================================================================
 
   if (isLoweringToLLVM || emitLLVM)
   {
+    optPM.addPass(mlir::createCanonicalizerPass());
     /// Blanket-convert any remaining high-level vector ops to loops if any remain.
     pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertVectorToSCFPass());
     /// Blanket-convert any remaining linalg ops to loops if any remain.

@@ -42,7 +42,7 @@
 #include <vector>
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -757,14 +757,22 @@ namespace tensorAlgebra
         lexer.getNextToken(); /// eat id
       }
 
-      if (lexer.getCurToken() != '=')
+      /// = [5/?] is now optional
+      if (lexer.getCurToken() == '=')
       {
-        ret.push_back(parseError<IndexLabelDeclExprAST>(
-            "=", "after 'IndexLabel' declaration(s)"));
+        lexer.consume(Token('='));
+      }
+      else
+      {
+        /// If no value was given we assume ? for all dimensions
+        for (auto &id : id_list)
+        {
+          ret.push_back(std::make_unique<IndexLabelDeclExprAST>(
+              loc, std::move(id), 0, mlir::ShapedType::kDynamic, 1));
+        }
+
         return ret;
       }
-
-      lexer.consume(Token('='));
 
       if (lexer.getCurToken() != '[')
       {
@@ -1045,9 +1053,21 @@ namespace tensorAlgebra
         {
           lexer.getNextToken(); /// eat [
 
-          while (lexer.getCurToken() == tok_identifier)
+          /// Possible values are: an index label, a numeric, or a ?
+          while (lexer.getCurToken() == tok_number || lexer.getCurToken() == tok_identifier || lexer.getCurToken() == '?')
           {
-            dims.push_back(lexer.getId().str());
+            if (lexer.getCurToken() == tok_number)
+            {
+              dims.push_back(std::to_string((int)lexer.getValue()));
+            }
+            else if (lexer.getCurToken() == tok_identifier)
+            {
+              dims.push_back(lexer.getId().str());
+            }
+            else
+            {
+              dims.push_back("?");
+            }
             lexer.getNextToken(); /// eat id
             if (lexer.getCurToken() == ',')
             {
@@ -1377,17 +1397,6 @@ namespace tensorAlgebra
             exprList->push_back(std::move(decl));
           }
         }
-        else if (lexer.getCurToken() == tok_dynamic_index_label)
-        {
-          // IndexLabel declaration
-          auto indexLabelDecls = ParseIndexLabelDynamicDeclaration();
-          if (indexLabelDecls.empty())
-            return nullptr;
-          for (auto &decl : indexLabelDecls)
-          {
-            exprList->push_back(std::move(decl));
-          }
-        }
         else if (lexer.getCurToken() == tok_tensor) /// 'Tensor' keyword
         {
           /// Tensor declaration
@@ -1660,11 +1669,11 @@ namespace tensorAlgebra
     std::unique_ptr<R> parseError(T &&expected, U &&context = "")
     {
       auto curToken = lexer.getCurToken();
-      llvm::errs() << __FILE__ << ":" << __LINE__ <<   "Parse error (" << lexer.getLastLocation().line << ", "
+      llvm::errs() << __FILE__ << ":" << __LINE__ << "Parse error (" << lexer.getLastLocation().line << ", "
                    << lexer.getLastLocation().col << "): expected '" << expected
                    << "' " << context << " but has Token " << curToken;
       if (isprint(curToken))
-        llvm::errs() << __FILE__ << ":" << __LINE__ <<  " '" << (char)curToken << "'";
+        llvm::errs() << __FILE__ << ":" << __LINE__ << " '" << (char)curToken << "'";
       llvm::errs() << "\n";
       return nullptr;
     }

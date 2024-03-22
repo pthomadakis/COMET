@@ -36,14 +36,13 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
-
 using namespace mlir;
 using namespace mlir::arith;
 using namespace mlir::bufferization;
 using namespace mlir::tensorAlgebra;
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -92,12 +91,25 @@ namespace
 
       /// When lowering the constant operation, we allocate and assign the constant
       /// values to a corresponding memref allocation.
-      auto tensorType = op.getType().cast<TensorType>();
+      auto tensorType = cast<TensorType>(op.getType());
       auto memRefType = convertTensorToMemRef(tensorType);
 
       comet_debug() << "User_setop: " << user_setOp << "/n";
       Value alloc;
-      alloc = rewriter.create<memref::AllocOp>(loc, memRefType);
+      if (user_setOp)
+      {
+        if (isa<ToTensorOp>(setnewop.getOperand(1).getDefiningOp()))
+        {
+          Operation *tensorload = cast<ToTensorOp>(setnewop.getOperand(1).getDefiningOp());
+          auto alloc_op = cast<memref::AllocOp>(tensorload->getOperand(0).getDefiningOp());
+          comet_vdump(alloc_op);
+          alloc = alloc_op;
+        }
+      }
+      else
+      {
+        alloc = rewriter.create<memref::AllocOp>(loc, memRefType);
+      }
 
       /// We will be generating constant indices up-to the largest dimension.
       /// Create these constants up-front to avoid large amounts of redundant
@@ -205,16 +217,7 @@ namespace
           {
             setOp = cast<tensorAlgebra::TensorSetOp>(u);
             Value dstTensor = u->getOperand(1);
-            /// TODO(gkestor): this following code block might be needed if we reintroduce label_tensor
-            if (isa<tensorAlgebra::LabeledTensorOp>(dstTensor.getDefiningOp()))
-            {
-              Value dstTensor_labeledTensor = cast<tensorAlgebra::LabeledTensorOp>(dstTensor.getDefiningOp());
-              lhs = dstTensor_labeledTensor.getDefiningOp()->getOperand(0);
-            }
-            else
-            {
-              lhs = dstTensor;
-            }
+            lhs = dstTensor;
           }
         }
 

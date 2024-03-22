@@ -24,11 +24,10 @@
 #include "comet/Dialect/IndexTree/IR/IndexTree.h"
 #include "comet/Dialect/IndexTree/Transforms/UnitExpression.h"
 
-
 using namespace std;
 
 // *********** For debug purpose *********//
-//#define COMET_DEBUG_MODE
+// #define COMET_DEBUG_MODE
 #include "comet/Utils/debug.h"
 #undef COMET_DEBUG_MODE
 // *********** For debug purpose *********//
@@ -98,51 +97,32 @@ void Index_Tree::print(string msg)
   getRoot()->print(0);
 }
 
-IndicesType Index_Tree::getIndices(mlir::Value v)
+IndicesType Index_Tree::getIndices(std::vector<mlir::Value> &lbls)
 {
   IndicesType indices;
 
-  void *ilabel;
-  for (unsigned int i = 0; i < v.getDefiningOp()->getNumOperands(); i++)
+  for (auto lbl : lbls)
   {
-    comet_vdump(v.getDefiningOp()->getOperand(i));
-    ilabel = v.getDefiningOp()->getOperand(i).getAsOpaquePointer();
-    if (indexLabelToId.count(ilabel) == 0)
+    comet_vdump(lbl);
+    void *lbl_ptr = lbl.getAsOpaquePointer();
+    if (indexLabelToId.count(lbl_ptr) == 0)
     {
       comet_debug() << "Index Label just created:" << indexID << "\n";
-      indexLabelToId[ilabel] = indexID;
+      indexLabelToId[lbl_ptr] = indexID;
       indexID++;
     }
-
-    comet_debug() << "Index Label just added to the list:" << indexLabelToId[ilabel] << "\n";
-    indices.push_back(indexLabelToId[ilabel]);
+    indices.push_back(indexLabelToId[lbl_ptr]);
   }
 
   return indices;
 }
 
-Tensor *Index_Tree::getOrCreateTensor(mlir::Value v, FormatsType &formats)
+Tensor *Index_Tree::getOrCreateTensor(mlir::Value v, std::vector<mlir::Value> &allIndexLabels, FormatsType &formats)
 {
-  IndicesType indices = getIndices(v);
-  void *vp = v.getAsOpaquePointer();
-  if (valueToTensor.count(vp) == 0)
-  {
-    valueToTensor[vp] = std::make_unique<Tensor>(v, indices, formats);
-  }
-  else
-  {
-    auto t = valueToTensor[vp].get();
-    auto tIndices = t->getIndices();
-    assert(tIndices.size() == indices.size());
-    for (unsigned long i = 0; i < indices.size(); i++)
-    {
-      assert(tIndices[i] == indices[i]);
-    }
-  }
+  IndicesType indices = getIndices(allIndexLabels);
+  comet_debug() << "Num Indices: " << indices.size() << ", Num formats " << formats.size() << "\n";
 
-  assert(valueToTensor.count(vp) > 0);
-  assert(valueToTensor[vp] != nullptr);
-  return valueToTensor[vp].get();
+  return new Tensor(v, indices, formats);
 }
 
 TreeNode *Index_Tree::addComputeNode(unique_ptr<UnitExpression> expr, TreeNode *parent)

@@ -48,16 +48,16 @@ def TA_Dialect : Dialect {
   
 }
 
-/// An implementation of RangeType.
-def TA_RangeType :
+/// An implementation of IndexLabelType.
+def TA_IndexLabelType :
     DialectType<TA_Dialect,
-                CPred<"$_self.isa<RangeType>()">,
-                "RangeType">;
+                CPred<"$_self.isa<IndexLabelType>()">,
+                "IndexLabelType">;
 
 
-/// Whether a type is a RangeType.
-def TAIsRangeTypePred : CPred<"$_self.isa<RangeType>()">;
-def Range : Type<TAIsRangeTypePred, "range">;
+/// Whether a type is a IndexLabelType.
+def TAIsIndexLabelTypePred : CPred<"$_self.isa<IndexLabelType>()">;
+def IndexLabel : Type<TAIsIndexLabelTypePred, "indexlabel">;
 
 /// Base class for ta dialect operations. This operation inherits from the base
 /// `Op` class in OpBase.td, and provides:
@@ -79,24 +79,22 @@ def TA_AnyTensor : AnyTypeOf<[TensorOf<[AnyType]>, SparseTensor]>;
 //===----------------------------------------------------------------------===//
 /// Tensor Algebra Operations
 //===----------------------------------------------------------------------===//
-def IndexLabelStaticOp :
-    TA_Op<"static_index_label", [Pure]>,
-    Arguments<(ins Index:$min, Index:$max, Index:$step)>,
-    Results<(outs Range)> {
+def IndexLabelOp :
+    TA_Op<"index_label", [Pure]>,
+    Results<(outs IndexLabel)> {
   let summary = "Create an index label type value, used to create views";
   let description = [{
-    The `ta.static_index_label` op creates a ta.static_index_label from 3 values of type `index`
-    that represent the min, max and step values of a range.
+    The `ta.index_label` op creates a ta.index_label.
 
     Example:
 
-      %3 = ta.static_index_label %0:%1:%2 : !ta.index_label
+      %3 = ta.index_label : !ta.index_label
   }];
 
-  let builders = [OpBuilder<(ins "Value":$min, "Value":$max, "Value":$step), 
+  let builders = [OpBuilder<(ins ), 
     [{
-      auto rangeType = RangeType::get($_builder.getContext());
-      build($_builder, $_state, rangeType, min, max, step);
+      auto indexLabelType = IndexLabelType::get($_builder.getContext());
+      build($_builder, $_state, indexLabelType);
     }]>];
   
 
@@ -107,29 +105,6 @@ def IndexLabelStaticOp :
 //===----------------------------------------------------------------------===//
 /// Tensor Algebra Operations
 //===----------------------------------------------------------------------===//
-def IndexLabelDynamicOp :
-    TA_Op<"dynamic_index_label", [Pure]>,
-    Arguments<(ins Index:$min, Index:$step)>,
-    Results<(outs Range)> {
-  let summary = "Create an index label dynamic type value, used to create views";
-  let description = [{
-    The `ta.dynamic_index_label` op creates a ta.dynamic_index_label from 2 values of type `index` that represent the min and step values of a range.
-
-    Example:
-
-      %3 = ta.dynamic_index_label %0:%1 : !ta.dynamic_index_label
-  }];
-
-  let builders = [OpBuilder<(ins "Value":$min, "Value":$step), 
-    [{
-      auto rangeType = RangeType::get($_builder.getContext());
-      build($_builder, $_state, rangeType, min, step);
-    }]>];
-
-
-  //TODO(gkestor): add verifier
-  //let hasVerifier = 1;
-}
 
 def DenseTensorDeclOp : TA_Op<"dense_tensor_decl", [Pure]> {
   /// Provide a summary and description for this operation. This can be used to
@@ -147,7 +122,7 @@ def DenseTensorDeclOp : TA_Op<"dense_tensor_decl", [Pure]> {
   }];
 
   /// The constant operation takes an attribute as the only input.
-  let arguments = (ins Variadic<Range>:$labels, StrAttr:$format);
+  let arguments = (ins Variadic<Index>:$labels, StrAttr:$format);
 
   /// The constant operation returns a single value of TensorType.
   let results = (outs AnyTensor);
@@ -174,26 +149,31 @@ def SparseTensorDeclOp : TA_Op<"sparse_tensor_decl", [Pure]> {
   }];
 
   /// The constant operation takes an attribute as the only input.
-  let arguments = (ins Variadic<Range>:$labels, StrAttr:$format, BoolAttr:$temporal_tensor);
+  let arguments = (ins Variadic<Index>:$labels, StrAttr:$format, BoolAttr:$temporal_tensor);
 
   /// The constant operation returns a single value of TensorType.
-  let results = (outs AnyTensor);
+  let results = (outs TA_AnyTensor);
 
   let extraClassDeclaration = [{
     unsigned int getParameterCount() {
-        return (getNumOperands() * 6) + 1;
+        mlir::TensorType type = getResult().getType().cast<TensorType>();
+        return (type.getRank() * 6) + 1;
     }
 
     unsigned int getDimArrayCount() {
-        return getNumOperands() * 4;
+        mlir::TensorType type = getResult().getType().cast<TensorType>();
+        return type.getRank() * 4;
     }
 
     unsigned int getValueArrayPos() {
-        return (getNumOperands() * 4) + 1;
+        mlir::TensorType type = getResult().getType().cast<TensorType>();
+
+        return (type.getRank() * 4) + 1;
     }
 
     unsigned int getTotalArrayCount() {
-        return (getNumOperands() * 4) + 1;
+        mlir::TensorType type = getResult().getType().cast<TensorType>();
+        return (type.getRank() * 4) + 1;
     }
   }];
 
@@ -219,7 +199,7 @@ def SparseOutputTensorDeclOp : TA_Op<"sparse_output_tensor_decl", [Pure]> {
   }];
 
   /// The constant operation takes an attribute as the only input.
-  let arguments = (ins Variadic<Range>:$labels, StrAttr:$format);
+  let arguments = (ins Variadic<Index>:$labels, StrAttr:$format);
 
   /// The constant operation returns a single value of TensorType.
   let results = (outs AnyTensor);
@@ -249,7 +229,7 @@ def TempSparseOutputTensorDeclOp : TA_Op<"temp_sparse_output_tensor_decl", [Pure
   }];
 
   /// The constant operation takes an attribute as the only input.
-  let arguments = (ins Variadic<Range>:$labels, StrAttr:$format);
+  let arguments = (ins Variadic<Index>:$labels, StrAttr:$format);
 
   /// The constant operation returns a single value of TensorType.
   let results = (outs AnyTensor);
@@ -373,7 +353,7 @@ def TensorMultOp : TA_Op<"mul", [Pure, AttrSizedOperandSegments]>{
   let description = [{
   }];
 
-  let arguments = (ins TA_AnyTensor:$rhs1, TA_AnyTensor:$rhs2, Variadic<Range>:$index_labels, 
+  let arguments = (ins TA_AnyTensor:$rhs1, TA_AnyTensor:$rhs2, Variadic<IndexLabel>:$index_labels, 
                    AffineMapArrayAttr:$indexing_maps, StrArrayAttr:$formats, StrAttr:$semiring, 
                    OptionalAttr<StrAttr>:$MaskType,  /// TODO: try to use: DefaultValuedAttr
                    Optional<AnyType>:$mask);
@@ -381,6 +361,63 @@ def TensorMultOp : TA_Op<"mul", [Pure, AttrSizedOperandSegments]>{
   /// Return value
   let results = (outs TA_AnyTensor);
 
+  let extraClassDeclaration = [{
+    std::vector<mlir::Value> getRhs1IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = 0;
+
+      mlir::TensorType type = getRhs1().getType().cast<TensorType>();
+      size_t end = type.getRank();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getRhs2IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      
+      mlir::TensorType type1 = getRhs1().getType().cast<TensorType>();
+      mlir::TensorType type2 = getRhs2().getType().cast<TensorType>();
+
+      size_t start = type1.getRank();
+      
+      size_t end = static_cast<size_t>(type1.getRank() + type2.getRank());
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getResultIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t end = getIndexLabels().size();
+      
+      mlir::TensorType type1 = getRhs1().getType().cast<TensorType>();
+      mlir::TensorType type2 = getRhs2().getType().cast<TensorType>();
+
+      size_t start = type1.getRank() + type2.getRank();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+    }
+
+  }];
   //TODO(gkestor): add verifier
   //let hasVerifier = 1;
   
@@ -394,7 +431,7 @@ def TensorElewsMultOp : TA_Op<"elews_mul", [Pure]>{
 
   let arguments = (ins TA_AnyTensor:$rhs1, 
                    TA_AnyTensor:$rhs2, 
-                   Variadic<Range>:$index_labels, 
+                   Variadic<IndexLabel>:$index_labels, 
                    AffineMapArrayAttr:$indexing_maps, 
                    StrArrayAttr:$formats, 
                    StrAttr:$semiring,
@@ -402,10 +439,87 @@ def TensorElewsMultOp : TA_Op<"elews_mul", [Pure]>{
   
   let results = (outs TA_AnyTensor);
 
+  let extraClassDeclaration = [{
+
+    std::vector<mlir::Value> getRhs1IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = 0;
+      mlir::TensorType type = getRhs1().getType().cast<TensorType>();
+      size_t end = type.getRank();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getRhs2IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      mlir::TensorType type1 = getRhs1().getType().cast<TensorType>();
+      mlir::TensorType type2 = getRhs2().getType().cast<TensorType>();
+      size_t start = type1.getRank();
+      
+      size_t end = static_cast<size_t>(type1.getRank() + type2.getRank());
+      
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getResultIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t end = getIndexLabels().size();
+      
+      mlir::TensorType type1 = getRhs1().getType().cast<TensorType>();
+      mlir::TensorType type2 = getRhs2().getType().cast<TensorType>();
+      size_t start = type1.getRank() + type2.getRank();
+      
+      
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+    }
+
+  }];
+
   //TODO(gkestor): add verifier
   //let hasVerifier = 1;
   
 }
+
+def TensorDimOp : TA_Op<"dim", [Pure]>{
+
+  let summary = "";
+  let description = [{
+  }];
+
+  let arguments = (ins  TA_AnyTensor:$tensor,
+                        Index:$index);
+  
+  let builders = [
+    OpBuilder<(ins "Value":$source, "int64_t":$index)>
+  ];
+
+  let results = (outs Index);
+  //let hasCanonicalizer = 1; 
+
+  //TODO(gkestor): add verifier
+  //let hasVerifier = 1;
+}
+
 
 def TensorSetOp : TA_Op<"set_op", [Pure]>{
 
@@ -425,10 +539,42 @@ def TensorSetOp : TA_Op<"set_op", [Pure]>{
 def TransposeOp : TA_Op<"transpose",[Pure]> {
   let summary = "transpose operation";
 
-  let arguments = (ins TA_AnyTensor:$rhs, Variadic<Range>:$index_labels, AffineMapArrayAttr:$indexing_maps, StrArrayAttr:$formats);
+  let arguments = (ins TA_AnyTensor:$rhs, Variadic<IndexLabel>:$index_labels, AffineMapArrayAttr:$indexing_maps, StrArrayAttr:$formats);
   
   let results = (outs TA_AnyTensor); 
 
+
+
+  let extraClassDeclaration = [{
+    std::vector<mlir::Value> getRhsIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = 0;
+      size_t end = static_cast<size_t>(getRhs().getType().cast<TensorType>().getRank());
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getResultIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = static_cast<size_t>(getRhs().getType().cast<TensorType>().getRank());
+      size_t end = getIndexLabels().size();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+    }
+
+  }];
   //TODO(gkestor): add verifier
   //let hasVerifier = 1;
 }
@@ -447,41 +593,6 @@ def ReduceOp : TA_Op<"reduce",[Pure]> {
   //let hasVerifier = 1;
 }
 
-def ChainMulOp : TA_Op<"chain_mul",
-    [Pure]> {
-  let summary = "";
-  let description = [{
-  }];
-
-  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs, Variadic<Range>:$sum_labels);
-
-  let results = (outs AnyTensor);
-
-  //TODO(gkestor): add verifier
-  //let hasVerifier = 1;
-
-  /// Allow building a MulOp with from the two input operands.
-  let builders = [
-    OpBuilder<(ins "Value":$lhs, "Value":$rhs)>,
-    OpBuilder<(ins "TensorType":$resultType, "Value":$lhs, "Value":$rhs)>,
-  ]; 
-}
-
-def ChainSetOp : TA_Op<"chain_set_op", [Pure]>{
-
-  let summary = "";
-  let description = [{
-  }];
-
-  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs);
-  let results = (outs AnyTensor);
-  
-  //let hasCanonicalizer = 1; 
-
-  //TODO(gkestor): add verifier
-  //let hasVerifier = 1;
-}
-
 def TensorAddOp : TA_Op<"add",
     [Pure]> {
   let summary = "element-wise addition operation";
@@ -492,7 +603,7 @@ def TensorAddOp : TA_Op<"add",
 
   let arguments = (ins TA_AnyTensor:$rhs1, 
                    TA_AnyTensor:$rhs2, 
-                   Variadic<Range>:$index_labels, 
+                   Variadic<IndexLabel>:$index_labels, 
                    AffineMapArrayAttr:$indexing_maps, 
                    StrArrayAttr:$formats, 
                    StrAttr:$semiring,
@@ -500,6 +611,51 @@ def TensorAddOp : TA_Op<"add",
   
   let results = (outs TA_AnyTensor);
 
+  let extraClassDeclaration = [{
+    std::vector<mlir::Value> getRhs1IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = 0;
+      size_t end = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank());
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getRhs2IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank());
+      size_t end = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank() + getRhs2().getType().cast<TensorType>().getRank());
+      
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getResultIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank() + getRhs2().getType().cast<TensorType>().getRank());
+      size_t end = getIndexLabels().size();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+    }
+
+  }];
 }
 
 def TensorSubtractOp : TA_Op<"subtract",
@@ -512,7 +668,7 @@ def TensorSubtractOp : TA_Op<"subtract",
 
   let arguments = (ins TA_AnyTensor:$rhs1, 
                    TA_AnyTensor:$rhs2, 
-                   Variadic<Range>:$index_labels, 
+                   Variadic<IndexLabel>:$index_labels, 
                    AffineMapArrayAttr:$indexing_maps, 
                    StrArrayAttr:$formats, 
                    StrAttr:$semiring,
@@ -520,6 +676,51 @@ def TensorSubtractOp : TA_Op<"subtract",
   
   let results = (outs TA_AnyTensor);
 
+  let extraClassDeclaration = [{
+    std::vector<mlir::Value> getRhs1IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = 0;
+      size_t end = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank());
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getRhs2IndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank());
+      size_t end = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank() + getRhs2().getType().cast<TensorType>().getRank());
+      
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+
+    }
+
+    std::vector<mlir::Value> getResultIndexLabels()
+    {
+      std::vector<mlir::Value> labels;
+      size_t start = static_cast<size_t>(getRhs1().getType().cast<TensorType>().getRank() + getRhs2().getType().cast<TensorType>().getRank());
+      size_t end = getIndexLabels().size();
+
+      for(size_t i = start; i < end; i++ )
+      {
+        labels.push_back(getIndexLabels()[i]);
+      }
+
+      return labels;
+    }
+
+  }];
 }
 
 //TODO(gkestor): support other datatypes
@@ -546,7 +747,7 @@ def DivOp : TA_Op<"div",
   let description = [{
   }];
 
-  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs, Variadic<Range>:$sum_labels);
+  let arguments = (ins AnyTensor:$lhs, AnyTensor:$rhs, Variadic<IndexLabel>:$sum_labels);
 
   let results = (outs AnyTensor);
 
@@ -754,20 +955,6 @@ def TensorFillFromFileOp : TA_Op<"fill_from_file", [Pure]>{
   //TODO(gkestor): add verifier
   //let hasVerifier = 1;
   
-}
-
-//TODO(gkestor): need to evaluate its use cases
-def LabeledTensorOp : TA_Op<"labeled_tensor", [Pure]>{
-
-  let summary = "Produce a sliced `subview` of a base `tensor`.";
-  let description = [{
-  }];
-
-  let arguments = (ins TA_AnyTensor:$tensor, Variadic<Range>:$labels);
-  let results = (outs TA_AnyTensor);
-
-  //TODO(gkestor): add verifier
-  //let hasVerifier = 1;
 }
 
 def TensorCopyOp : TA_Op<"copy", [Pure]>{
