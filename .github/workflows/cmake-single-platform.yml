@@ -86,4 +86,4 @@ jobs:
       shell: bash
 
       run: | 
-        python3 ${{github.workspace}}/frontends/numpy-scipy/integration_tests/numpy_integration.py
+        cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py
