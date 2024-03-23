@@ -53,6 +53,7 @@ if __name__ == '__main__':
 
         for failed_test in list_failed_tests:
             print('  ' , failed_test[0])
+        exit(1)
     
     if len(sys.argv) == 2:
         if sys.argv[1] == '-v':
