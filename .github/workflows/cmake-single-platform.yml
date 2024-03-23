@@ -62,7 +62,11 @@ jobs:
     - name: Install python dependencies
       run: |
           sudo apt-get install -y python3-psutil
-      
+          sudo apt-get install -y python3-pip
+
+    - name: Install CometPy
+      run: |
+            cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
     - name: Test
       env: 
         LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
@@ -75,4 +79,11 @@ jobs:
           ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner -h
           ${{github.workspace}}/build/bin/comet-opt -h
           ninja check-comet-integration
-  
+    - name: Test CometPy
+      env: 
+        LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+
+      run: | 
+        python3 ${{github.workspace}}/frontends/numpy-scipy/integration_tests/numpy_integration.py
