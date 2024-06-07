@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - uses: lukka/get-cmake@latest
 
     
@@ -67,6 +67,7 @@ jobs:
     - name: Install CometPy
       run: |
             cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
+            
     - name: Test
       env: 
         LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
@@ -87,3 +88,11 @@ jobs:
 
       run: | 
         cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py -v
+    
+    - name: Test Rust
+      working-directory: ${{github.workspace}}/frontends/rust/comet-rs
+      run: |
+        rustup update stable && rustup default stable
+        cargo build
+        cargo test
+      
