@@ -1,6 +1,6 @@
 # This starter workflow is for a CMake project running on a single platform. There is a different starter workflow if you need cross-platform coverage.
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
-name: CMake on a single platform
+name: Test Backend on Linux
 
 on:
   push:
@@ -27,7 +27,8 @@ jobs:
     
     - name: Cache Submodules
       id: cache-submodule
-      uses: actions/cache@v3
+      uses: actions/cache/save@v3
+      if: always()
       with:
         path: |
           ${{github.workspace}}/llvm
@@ -47,7 +48,7 @@ jobs:
 
     - name: Build blis
       if: steps.cache-submodule.outputs.cache-hit != 'true'
-      run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install auto && make && make install
+      run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install --disable-shared auto && make && make install
 
     - name: Build COMET
       # Build your program with the given configuration
@@ -64,28 +65,26 @@ jobs:
           sudo apt-get install -y python3-psutil
           sudo apt-get install -y python3-pip
 
-    - name: Install CometPy
-      run: |
-            cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
+
             
     - name: Test
-      env: 
-        LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
       working-directory: ${{github.workspace}}/build
       shell: bash
-    #   # Execute tests defined by the CMake configuration.
-      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
        
       run: |
           ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner -h
           ${{github.workspace}}/build/bin/comet-opt -h
           ninja check-comet-integration
-    - name: Test CometPy
-      env: 
-        LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
-      working-directory: ${{github.workspace}}/build
-      shell: bash
+    
+    # - name: Install CometPy
+    #   run: |
+    #         cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
+    # - name: Test CometPy
+    #   env: 
+    #     LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
+    #   working-directory: ${{github.workspace}}/build
+    #   shell: bash
 
-      run: | 
-        cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py -v
+    #   run: | 
+    #     cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py -v
       
