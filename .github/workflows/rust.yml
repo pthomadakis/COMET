@@ -1,6 +1,6 @@
 # This starter workflow is for a CMake project running on a single platform. There is a different starter workflow if you need cross-platform coverage.
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
-name: CMake on a single platform
+name: Test Rust frontend on Linux
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
     
     - name: Cache Submodules
       id: cache-submodule
-      uses: actions/cache@v3
+      uses: actions/cache/save@v3
       with:
         path: |
           ${{github.workspace}}/llvm
@@ -47,15 +47,13 @@ jobs:
 
     - name: Build blis
       if: steps.cache-submodule.outputs.cache-hit != 'true'
-      run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install auto && make && make install
+      run: cd ${{github.workspace}} && patch -s -p0 < comet-blis.patch && cd blis && ./configure --prefix=$COMET_SRC/install --disable-shared auto && make && make install
 
     - name: Build COMET
       # Build your program with the given configuration
       run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=${{github.workspace}}/llvm/build/lib/cmake/mlir -DLLVM_DIR=${{github.workspace}}/llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
     
     - name: Test Rust
-      env: 
-        LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
       working-directory: ${{github.workspace}}/frontends/rust/comet-rs
       run: |
         rustup update stable && rustup default stable
