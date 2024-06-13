@@ -27,7 +27,8 @@ jobs:
     
     - name: Cache Submodules
       id: cache-submodule
-      uses: actions/cache@v3
+      uses: actions/cache/save@v4
+      if: always()
       with:
         path: |
           ${{github.workspace}}/llvm
