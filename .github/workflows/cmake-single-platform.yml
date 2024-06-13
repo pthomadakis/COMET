@@ -14,7 +14,7 @@ env:
   COMET_SRC: ${{github.workspace}}
 
 jobs:
-  build:
+  build-comet:
     # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
     # You can convert this to a matrix build if you need cross-platform coverage.
     # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
@@ -53,6 +53,13 @@ jobs:
       # Build your program with the given configuration
       run: mkdir ${{github.workspace}}/build && cd ${{github.workspace}}/build && cmake -G Ninja .. -DMLIR_DIR=${{github.workspace}}/llvm/build/lib/cmake/mlir -DLLVM_DIR=${{github.workspace}}/llvm/build/lib/cmake/llvm -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_BUILD_TYPE=Release && ninja 
 
+  test-comet-backend:
+
+    needs: build-comet
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
     - name: Initialize Python 3.11
       uses: actions/setup-python@v4
       
@@ -74,16 +81,41 @@ jobs:
           ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner -h
           ${{github.workspace}}/build/bin/comet-opt -h
           ninja check-comet-integration
-    
-    # - name: Install CometPy
-    #   run: |
-    #         cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
-    # - name: Test CometPy
-    #   env: 
-    #     LD_LIBRARY_PATH: ${{github.workspace}}/install/lib/
-    #   working-directory: ${{github.workspace}}/build
-    #   shell: bash
+  
+  test-rust-frontend:
+    needs: build-comet
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
 
-    #   run: | 
-    #     cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py -v
+    - name: Setup Rust environment
+      run: rustup update stable && rustup default stable
+      
+    - name: Test Rust Frontend
+      working-directory: ${{github.workspace}}/frontends/rust/comet-rs
+      run: |
+        cargo build
+        cargo test
+  
+  test-cometpy:
+    needs: build-comet
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install CometPy
+
+    - name: Initialize Python 3.11
+      uses: actions/setup-python@v4
+      
+      with:
+          python-version: 3.11
+    - name: Setup cometPy
+            cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
+    
+    - name: Test CometPy
+      working-directory: ${{github.workspace}}/build
+
+      run: | 
+        cd ${{github.workspace}}/frontends/numpy-scipy/integration_tests/ && python3 numpy_integration.py -v
       
