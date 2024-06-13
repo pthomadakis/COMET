@@ -111,7 +111,7 @@ jobs:
       with:
           python-version: 3.11
     - name: Setup cometPy
-            cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
+      run: cd ${{github.workspace}}/frontends/numpy-scipy/ && pip3 install -e .
     
     - name: Test CometPy
       working-directory: ${{github.workspace}}/build
