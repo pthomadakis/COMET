@@ -118,6 +118,8 @@ jobs:
       run: rustup update stable && rustup default stable
       
     - name: Test Rust Frontend
+      env:
+        COMET_DIR: =${{github.workspace}}/
       working-directory: ${{github.workspace}}/frontends/rust/comet-rs
       run: |
         cargo build
