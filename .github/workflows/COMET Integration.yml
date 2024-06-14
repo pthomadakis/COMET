@@ -59,8 +59,10 @@ jobs:
 
     needs: build-comet
     runs-on: ubuntu-latest
+    
     steps:
     - uses: actions/checkout@v4
+    - uses: lukka/get-cmake@latest
 
     - name: Cache Submodules
       id: cache-submodule
