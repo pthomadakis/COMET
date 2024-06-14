@@ -60,6 +60,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    - name: Cache Submodules
+      id: cache-submodule
+      uses: actions/cache@v4
+      # if: always()
+      with:
+        path: |
+          ${{github.workspace}}/llvm
+          ${{github.workspace}}/blis/
+          ${{github.workspace}}/install/
+        key: ${{ runner.os }}-submodules
     
     - name: Initialize Python 3.11
       uses: actions/setup-python@v4
@@ -88,7 +99,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-
+    
+    - name: Cache Submodules
+      id: cache-submodule
+      uses: actions/cache@v4
+      # if: always()
+      with:
+        path: |
+          ${{github.workspace}}/llvm
+          ${{github.workspace}}/blis/
+          ${{github.workspace}}/install/
+        key: ${{ runner.os }}-submodules
+        
     - name: Setup Rust environment
       run: rustup update stable && rustup default stable
       
