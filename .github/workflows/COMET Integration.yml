@@ -121,7 +121,7 @@ jobs:
       
     - name: Test Rust Frontend
       env:
-        COMET_DIR: =${{github.workspace}}/
+        COMET_DIR: ${{github.workspace}}/
       working-directory: ${{github.workspace}}/frontends/rust/comet-rs
       run: |
         cargo build
