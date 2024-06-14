@@ -92,8 +92,8 @@ jobs:
       shell: bash
        
       run: |
-          ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner -h
-          ${{github.workspace}}/build/bin/comet-opt -h
+          ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner --help
+          ${{github.workspace}}/build/bin/comet-opt --help
           ninja check-comet-integration
   
   test-rust-frontend:
