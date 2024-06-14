@@ -71,6 +71,7 @@ jobs:
           ${{github.workspace}}/llvm
           ${{github.workspace}}/blis/
           ${{github.workspace}}/install/
+          ${{github.workspace}}/build/
         key: ${{ runner.os }}-submodules
     
     - name: Initialize Python 3.11
@@ -110,6 +111,7 @@ jobs:
           ${{github.workspace}}/llvm
           ${{github.workspace}}/blis/
           ${{github.workspace}}/install/
+          ${{github.workspace}}/build/
         key: ${{ runner.os }}-submodules
         
     - name: Setup Rust environment
@@ -127,6 +129,18 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    - name: Cache Submodules
+      id: cache-submodule
+      uses: actions/cache@v4
+      # if: always()
+      with:
+        path: |
+          ${{github.workspace}}/llvm
+          ${{github.workspace}}/blis/
+          ${{github.workspace}}/install/
+          ${{github.workspace}}/build/
+        key: ${{ runner.os }}-submodules
+        
     - name: Initialize Python 3.11
       uses: actions/setup-python@v4
       
