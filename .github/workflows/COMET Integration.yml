@@ -91,10 +91,10 @@ jobs:
       working-directory: ${{github.workspace}}/build
       shell: bash
        
-      run: |
-          ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner --help
-          ${{github.workspace}}/build/bin/comet-opt --help
-          ninja check-comet-integration
+      run: ninja check-comet-integration
+          # ${{github.workspace}}/llvm/build/bin/mlir-cpu-runner --help
+          # ${{github.workspace}}/build/bin/comet-opt --help
+          
   
   test-rust-frontend:
     needs: build-comet
